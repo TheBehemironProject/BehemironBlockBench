@@ -2,11 +2,16 @@
 # rebase upstream/master 时永远不会冲突。
 #
 # pnpm v10+ 默认拒绝任意包运行 postinstall / install / preinstall 脚本
-# (防供应链攻击)。下列包都是 Blockbench 原生构建链的组成部分,上游已审核。
-# 全部放行以保证 dev / build-web / build-electron / package 任一姿势都可用。
+# (防供应链攻击)。
+#
+# 决策依据:Behemiron 集成方案只走 web 构建(iframe 嵌入 + Wails 子窗口),
+# 因此 Electron 相关包对我们的运行时和构建流水线都不必需,显式拒绝以避免
+# 几百 MB 的 Electron binary 下载与无意义的 native build。
+#
+# 若未来需要本地跑原版 Electron 对照,可临时把对应项改成 true。
 
 allowBuilds:
-  '@parcel/watcher': true   # Electron dev 模式文件监听
-  electron: true            # Electron 桌面运行时(用于对照原版 Blockbench)
-  electron-winstaller: true # Windows 安装包构造
-  esbuild: true             # 构建必需(web 构建也走 esbuild)
+  esbuild: true              # 必需 —— web 构建(build.js --target=web)走 esbuild
+  '@parcel/watcher': false   # 仅 Electron dev hot-reload 用,web --serve 不需要
+  electron: false            # 我们不跑 Electron 运行时
+  electron-winstaller: false # 我们不出 Electron 安装包

@@ -11,7 +11,17 @@
 # 若未来需要本地跑原版 Electron 对照,可临时把对应项改成 true。
 
 allowBuilds:
-  esbuild: true              # 必需 —— web 构建(build.js --target=web)走 esbuild
-  '@parcel/watcher': false   # 仅 Electron dev hot-reload 用,web --serve 不需要
-  electron: false            # 我们不跑 Electron 运行时
+  esbuild: true # 必需 —— web 构建(build.js --target=web)走 esbuild
+  '@parcel/watcher': false # 仅 Electron dev hot-reload 用,web --serve 不需要
+  electron: false # 我们不跑 Electron 运行时
   electron-winstaller: false # 我们不出 Electron 安装包
+
+# Blockbench 源码 js/lib/libs.ts 直接 import 'sortablejs',而它实际是
+# vue-sortable 的 transitive 依赖(典型幽灵依赖)。
+# pnpm 默认严格模式只暴露直接依赖,build-web 会因找不到 sortablejs 而失败。
+# 开启 shamefullyHoist 让 pnpm 模拟 npm 的全量 hoist 行为,
+# 一次性兼容所有此类幽灵依赖(无需逐个修改上游代码或 package.json)。
+#
+# 注:pnpm v11 之后 .npmrc 仅承载 registry/auth 配置,其他 pnpm 配置
+# (包括 hoist 行为)必须放在 pnpm-workspace.yaml。
+shamefullyHoist: true

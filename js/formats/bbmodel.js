@@ -903,19 +903,16 @@ BARS.defineActions(function() {
 		}
 	})
 
+	// [Behemiron] 这个 action 已在 UI 中改名为"导出项目" / "Export Project"
+	// (见 lang/zh.json + en.json 的 action.save_project_as)。语义改为
+	// 真实下载 .bbmodel 文件,与"保存项目"(SQLite 持久化)语义分离。
 	new Action('save_project_as', {
-		icon: 'save',
+		icon: 'file_download',
 		category: 'file',
 		keybind: new Keybind({key: 's', ctrl: true, alt: true, shift: true}),
 		condition: () => Project,
 		click: function () {
 			saveTextures(true)
-			// [Behemiron] "另存为"语义在嵌入态没有 picker(没有本地文件系统),
-			// 退化到与普通保存相同的 SQLite 持久化路径。
-			if (typeof window.behemironSave === 'function') {
-				window.behemironSave();
-				return;
-			}
 			codec.export()
 		}
 	})

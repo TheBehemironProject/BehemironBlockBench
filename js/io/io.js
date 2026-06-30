@@ -646,13 +646,19 @@ BARS.defineActions(function() {
 			})
 		}
 	})
-	// Smart Save
+	// Smart Save —— BB 默认 Ctrl+S 入口,会走 codec.export(浏览器下载)。
+	// [Behemiron] 嵌入态时改走 behemironSave 持久化到 SQLite,不再触发下载。
 	new Action('export_over', {
 		icon: 'save',
 		category: 'file',
 		keybind: new Keybind({key: 's', ctrl: true}),
 		condition: () => Project,
 		click: async function(event) {
+			// [Behemiron] 嵌入 BehemironIDE 时优先走 SQLite 持久化
+			if (typeof window.behemironSave === 'function') {
+				window.behemironSave();
+				return;
+			}
 			let export_codec = Codecs[Project.export_codec] ?? Format?.codec;
 			if (isApp) {
 				await saveTextures()

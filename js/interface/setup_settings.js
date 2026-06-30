@@ -6,10 +6,12 @@ import { addStartScreenSection } from "./start_screen";
 
 function setupSettings() {
 	// [Behemiron] 嵌入态优先用 Wails AssetService 注入的 settings(早于 bundle.js,
-	// 跳过 localStorage 的写入时序/被覆盖问题)。
-	if (window.__BEHEMIRON_BB_SETTINGS__ && typeof window.__BEHEMIRON_BB_SETTINGS__ === 'object') {
-		Settings.stored = window.__BEHEMIRON_BB_SETTINGS__;
-		// 同步回 localStorage,这样其他依赖 localStorage 的代码也能拿到一致视图
+	// 跳过 localStorage 的写入时序/被覆盖问题)。仅当注入对象**非空**才覆盖,
+	// 避免空 {} 让所有 Setting 走默认值(如 language 会回到硬编码 'en')。
+	var injected = window.__BEHEMIRON_BB_SETTINGS__;
+	var hasInjected = injected && typeof injected === 'object' && Object.keys(injected).length > 0;
+	if (hasInjected) {
+		Settings.stored = injected;
 		try {
 			localStorage.setItem('settings', JSON.stringify(Settings.stored));
 		} catch (e) { /* noop */ }
@@ -18,7 +20,9 @@ function setupSettings() {
 	}
 	
 	//General
-	new Setting('language', {value: 'en', type: 'select', requires_restart: true, options: Language.options});
+	// [Behemiron] default 用 Language.code(已被 languages.ts 按 navigator 或注入数据
+	// 计算过),避免硬编码 'en' 让 Setting master_value 与 Language.code 错位。
+	new Setting('language', {value: Language.code || 'en', type: 'select', requires_restart: true, options: Language.options});
 	new Setting('username', {value: '', type: 'text'});
 	new Setting('streamer_mode', {value: false, onChange() {
 		StartScreen.vue._data.redact_names = settings.streamer_mode.value;

@@ -139,13 +139,18 @@
       if (!window.Project || !window.Codecs || !window.Codecs.project) return null;
       var name = window.Project.name || '';
       var isNamed = name && name.trim() && name.trim() !== 'noname';
-      // explicit save(Ctrl+S / Save Project)允许未命名:用户主动按了保存,
-      // 这种情况下我们仍然 persist,后续 BB 会让用户在保存对话框里命名(实际上
-      // BB 在嵌入态没对话框,但 finish_edit 自动保存才是堆积罪魁)
       if (!opts.allowUnnamed && !isNamed) {
         return null;
       }
+      // BB bbmodel codec 默认不存 Project.uuid。每次 reload + restore
+      // 都会让 ModelProject 生成新 uuid,导致同一个工程被 DB 视为新行
+      // 不断累积。这里在 raw 模式 compile 出的对象里注入 behemiron_uuid,
+      // restore 时(restoreProjects / openSingleProject)读出来覆盖回
+      // Project.uuid,保证主键稳定。
       var json = window.Codecs.project.compile({ raw: true });
+      if (json && typeof json === 'object') {
+        json.behemiron_uuid = window.Project.uuid;
+      }
       var content = typeof json === 'string' ? json : JSON.stringify(json);
       return {
         uuid: window.Project.uuid || '',
@@ -164,6 +169,16 @@
     }
   }
 
+  // 给刚加载的 Project 强制恢复稳定 uuid。
+  // BB Codecs.project.load 不会从 model 拿 uuid,默认给新工程生成新 uuid。
+  // 必须 load 完后立即手动 set,确保后续 save 命中同一个 DB 行(upsert)。
+  function rebindProjectUuid(stableUuid) {
+    if (!stableUuid) return;
+    if (window.Project && window.Project.uuid !== stableUuid) {
+      window.Project.uuid = stableUuid;
+    }
+  }
+
   function restoreProjects(projects) {
     if (!projects || !projects.length) return;
     if (!window.Codecs || !window.Codecs.project || typeof window.Codecs.project.load !== 'function') {
@@ -179,12 +194,13 @@
         try {
           var model = JSON.parse(p.contentJson);
           window.Codecs.project.load(model, { path: '' });
+          // 优先用 contentJson 里注入的 behemiron_uuid,回退到 ProjectMeta.uuid
+          rebindProjectUuid(model.behemiron_uuid || p.uuid);
         } catch (e) {
           log('restore project failed,uuid=', p.uuid, e);
         }
       }
     } finally {
-      // 给 BB 一拍消化 select_project 事件,再放开回写
       setTimeout(function () { restoringProjects = false; }, 500);
     }
   }
@@ -195,6 +211,7 @@
     try {
       var model = JSON.parse(project.contentJson);
       window.Codecs.project.load(model, { path: '' });
+      rebindProjectUuid(model.behemiron_uuid || project.uuid);
     } catch (e) {
       log('openSingleProject failed', e);
     }

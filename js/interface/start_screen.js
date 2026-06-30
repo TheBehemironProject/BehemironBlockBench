@@ -533,61 +533,11 @@ onVueSetup(async function() {
 
 
 (function() {
-	/*$.getJSON('./content/news.json').then(data => {
-		addStartScreenSection('new_version', data.new_version)
-	})*/
-
-	var news_call = $.ajax({
-		cache: false,
-		url: 'https://web.blockbench.net/content/news.json',
-		dataType: 'json'
-	});
+	// [Behemiron] 已移除上游的 news.json 网络请求 + Bluesky/Discord/new_version/psa
+	// banner 入口。原因:嵌入到 BehemironIDE 后这些社交/版本入口与品牌不符,
+	// 且 news.json 来自 web.blockbench.net 会产生外部网络依赖。
+	// 保留 quick_setup(首次启动的语言/主题快速选择 UI)。
 	documentReady.then(() => {
-
-		//Bluesky
-		let bsky_ad;
-		Blockbench.onUpdateTo('4.12.2', () => {
-			//Bluesky
-			if (!settings.classroom_mode.value) {
-				bsky_ad = true;
-				addStartScreenSection('bluesky_link', {
-					color: 'rgb(32, 139, 254);',
-					text_color: '#ffffff',
-					graphic: {type: 'icon', icon: 'fab.fa-bluesky'},
-					text: [
-						{type: 'h3', text: 'Blockbench on Bluesky'},
-						{text: 'Follow Blockbench on Bluesky for the latest news & cool models from the community! [@blockbench.net](https://bsky.app/profile/blockbench.net)'}
-					],
-					last: true
-				})
-			}
-		})
-		if (!settings.classroom_mode.value && !bsky_ad && Blockbench.startup_count < 20 && Blockbench.startup_count % 5 === 4) {
-			bsky_ad = true;
-			addStartScreenSection('bluesky_link', {
-				color: 'rgb(32, 139, 254);',
-				text_color: '#ffffff',
-				graphic: {type: 'icon', icon: 'fab.fa-bluesky'},
-				text: [
-					{type: 'h3', text: 'Blockbench on Bluesky'},
-					{text: 'Follow Blockbench on Bluesky for the latest news & cool models from the community! [@blockbench.net](https://bsky.app/profile/blockbench.net)'}
-				],
-				last: true
-			})
-		}
-		//Discord
-		if (!settings.classroom_mode.value && Blockbench.startup_count < 6 && !bsky_ad) {
-			addStartScreenSection('discord_link', {
-				color: '#5865F2',
-				text_color: '#ffffff',
-				graphic: {type: 'icon', icon: 'fab.fa-discord'},
-				text: [
-					{type: 'h2', text: 'Discord Server'},
-					{text: 'You need help with modeling or you want to chat about Blockbench? Join the official [Blockbench Discord](https://discord.gg/WVHg5kH)!'}
-				],
-				last: true
-			})
-		}
 
 		// Quick Setup
 		if (Blockbench.startup_count <= 1) {
@@ -678,38 +628,9 @@ onVueSetup(async function() {
 			}).$mount(section);
 		}
 	})
-	Promise.all([news_call, documentReady]).then((data) => {
-		if (!data || !data[0]) return;
-		data = data[0];
-
-		//Update Screen
-		if (Blockbench.hasFlag('after_update') && data.new_version) {
-			data.new_version.insert_after = 'splash_screen'
-			addStartScreenSection('new_version', data.new_version);
-			jQuery.ajax({
-				url: 'https://blckbn.ch/api/event/successful_update',
-				type: 'POST',
-				data: {
-					version: Blockbench.version
-				}
-			})
-		}
-		if (data.psa) {
-			(function() {
-				if (typeof data.psa.version == 'string') {
-					if (data.psa.version.includes('-')) {
-						limits = data.psa.version.split('-');
-						if (limits[0] && VersionUtil.compare(Blockbench.version, '<', limits[0])) return;
-						if (limits[1] && VersionUtil.compare(Blockbench.version, '>', limits[1])) return;
-					} else {
-						if (data.psa.version != Blockbench.version) return;
-					}
-				}
-				addStartScreenSection('psa', data.psa);
-			})()
-		}
-
-	})
+	// [Behemiron] 已移除 Promise.all([news_call, documentReady]) —— 包含
+	// new_version banner + 后端 telemetry POST + psa(公告)banner,
+	// 全部依赖 news.json,与 news_call XHR 一同删除。
 })()
 
 Object.assign(window, {

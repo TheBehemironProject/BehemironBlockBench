@@ -12,21 +12,13 @@ if (query_string) {
 
 
 export function initializeWebApp() {
-	
+
 	$(document.body).on('click', 'a[href]', (event) => {
 		event.preventDefault();
 		window.open(event.currentTarget.href, '_blank');
 	});
-	if (location.host == 'blockbench-dev.netlify.app') {
-		let button = $(`<a href="https://www.netlify.com/" style="padding: 10px; color: white; cursor: pointer; text-decoration: none; display: block;" target="_blank" rel="noopener">
-				Hosted by
-				<img src="./assets/netlify-full-logo-dark.svg" height="20px" style="vertical-align: text-top;">
-			</div>`);
-		button.insertBefore('#start_files');
-	}
-	if (!Blockbench.isTouch && !Blockbench.isPWA) {
-		$('#web_download_button').show()
-	}
+	// [Behemiron] 移除了 blockbench-dev.netlify.app 的 "Hosted by Netlify" 推广横幅
+	// 与 #web_download_button 的 show 逻辑(按钮元素已从 index.html 删除)。
 
 	if (Blockbench.browser == 'firefox') {
 		document.body.style.imageRendering = 'crisp-edges'
@@ -63,13 +55,8 @@ addEventListener('popstate', e => {
 	window.history.pushState({}, '');
 })
 
-try {
-	window.matchMedia('(display-mode: standalone)').addEventListener('change', (evt) => {
-		if (!Blockbench.isMobile) $('#web_download_button').toggle(!evt.matches);
-	});
-} catch (err) {
-	if (!Blockbench.isMobile) $('#web_download_button').hide();
-}
+// [Behemiron] 移除了 display-mode 监听器:原本用来根据 PWA 安装状态
+// toggle #web_download_button 显隐,按钮已删除,逻辑不再需要。
 
 export async function loadInfoFromURL() {
 	if (Blockbench.queries.session) {

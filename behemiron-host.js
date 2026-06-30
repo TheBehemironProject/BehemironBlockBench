@@ -2,21 +2,26 @@
  * behemiron-host.js
  *
  * BlockBench fork 与 Behemiron Workerbench 主项目的桥接脚本。
- * 仅在嵌入态生效（iframe 或带 ?host=behemiron 查询的弹出窗口）。
+ * 仅在嵌入态生效(iframe 或带 ?host=behemiron 查询的弹出窗口)。
  *
- * 职责：
- *   1. 注入 CSS：隐藏 Download App 按钮、Discord/Bluesky/PSA/new_version banner
- *   2. 覆盖 document.title 为 "BlockBench - Behemiron"
- *   3. 拦截 addStartScreenSection：屏蔽黑名单 section id
- *   4. 双向桥接（postMessage）：
- *      - 接收 host:theme / host:language / host:projects-restore / host:project-open / host:flush-current
- *      - 发送 bb:ready / bb:project-saved / bb:project-switched / bb:project-closed / bb:flush-response
- *   5. Hook Blockbench 事件：finish_edit（防抖 1s）/ select_project / close_project / load_project
+ * 职责(仅"动态" / "运行时"的桥接,**静态 UI 改动已下放到源码**):
+ *   1. 双向桥接(postMessage):
+ *      - 接收 host:theme / host:language / host:projects-restore /
+ *        host:project-open / host:flush-current
+ *      - 发送 bb:ready / bb:project-saved / bb:project-switched /
+ *        bb:project-closed / bb:flush-response
+ *   2. Hook Blockbench 事件:finish_edit(防抖 1s) / select_project /
+ *      close_project / load_project / new_project
  *
- * 实现铁律：
- *   - 不直接编辑 BB 其他文件，所有改动通过 monkey patch / 事件订阅
- *   - 防御性编程：BB 全局可能未就绪，每次访问都判空
- *   - 单向数据流：host 命令优先级高于 BB 内部状态（如主题/语言来自 Behemiron）
+ * **下面这些原本在本脚本里的非侵入式逻辑已迁移到源码**(不再 monkey-patch):
+ *   - index.html: title 直接写 "BlockBench - Behemiron",删除 #web_download_button
+ *   - js/web.js: 删除 #web_download_button.show() + display-mode 监听
+ *   - js/interface/interface.js: setProjectTitle 默认 title + 后缀改为 Behemiron
+ *   - js/interface/start_screen.js: 删除 discord_link / bluesky_link /
+ *     new_version / psa 4 个 addStartScreenSection 调用 + news.json XHR
+ *
+ * 这样所有 UI 静态改动都在源码里"确定性"生效,不依赖 setInterval 轮询或
+ * MutationObserver 反应式;本脚本只承担真正动态的桥接职责。
  */
 (function () {
   'use strict';
@@ -28,14 +33,10 @@
   if (!isHosted) return;
 
   // ---- 配置 ----
-  var HOST_TITLE = 'BlockBench - Behemiron';
-  var BLOCKED_SECTIONS = ['discord_link', 'bluesky_link', 'psa', 'new_version'];
   var FINISH_EDIT_DEBOUNCE_MS = 1000;
 
   // ---- 状态 ----
-  var bridgeReady = false;
   var finishEditTimer = null;
-  var flushRequestPending = null; // { requestId, resolve }
   var restoringProjects = false; // 避免恢复时回写
 
   // ---- 工具 ----
@@ -67,68 +68,7 @@
     }, 50);
   }
 
-  // ---- 1. CSS 注入（早期生效）----
-  function injectHostCSS() {
-    var css =
-      '#web_download_button { display: none !important; }\n' +
-      '/* 起始页 banner / 社交入口（按 id 与 data-section-id 双重选中） */\n' +
-      '#start_screen > #discord_link,\n' +
-      '#start_screen > #bluesky_link,\n' +
-      '#start_screen > #psa,\n' +
-      '#start_screen > #new_version,\n' +
-      '#start_screen [data-section-id="discord_link"],\n' +
-      '#start_screen [data-section-id="bluesky_link"],\n' +
-      '#start_screen [data-section-id="psa"],\n' +
-      '#start_screen [data-section-id="new_version"] { display: none !important; }\n';
-    var style = document.createElement('style');
-    style.id = 'behemiron-host-style';
-    style.textContent = css;
-    (document.head || document.documentElement).appendChild(style);
-  }
-
-  // ---- 2. 标题覆盖 ----
-  function pinTitle() {
-    try {
-      document.title = HOST_TITLE;
-      // 防止 BB 后续动态改回，监听 title 元素变化
-      var titleEl = document.querySelector('head > title');
-      if (titleEl && typeof MutationObserver === 'function') {
-        var mo = new MutationObserver(function () {
-          if (document.title !== HOST_TITLE) document.title = HOST_TITLE;
-        });
-        mo.observe(titleEl, { childList: true, characterData: true, subtree: true });
-      }
-    } catch (e) {
-      log('pinTitle failed', e);
-    }
-  }
-
-  // ---- 3. addStartScreenSection 拦截 ----
-  function patchAddStartScreenSection() {
-    // 这个全局函数在 boot 后才存在。轮询挂钩。
-    var attempts = 0;
-    var t = setInterval(function () {
-      attempts++;
-      if (typeof window.addStartScreenSection === 'function') {
-        clearInterval(t);
-        var orig = window.addStartScreenSection;
-        window.addStartScreenSection = function (id, data) {
-          if (BLOCKED_SECTIONS.indexOf(id) !== -1) {
-            log('blocked section:', id);
-            return null;
-          }
-          return orig.call(this, id, data);
-        };
-        log('addStartScreenSection patched');
-      } else if (attempts > 200) {
-        // 10s 还没出现就放弃
-        clearInterval(t);
-        log('addStartScreenSection never appeared');
-      }
-    }, 50);
-  }
-
-  // ---- 4. 主题应用 ----
+  // ---- 1. 主题应用 ----
   function applyHostTheme(mode) {
     if (mode !== 'light' && mode !== 'dark') return;
     try {
@@ -136,25 +76,27 @@
         (window.CustomTheme && window.CustomTheme.themes) ||
         (window.Blockbench && window.Blockbench.themes) ||
         [];
+      // BB 内置主题 id: 'default'(dark) / 'default_light'(light) / 'contrast'
+      var targetId = mode === 'dark' ? 'default' : 'default_light';
       var target = null;
       for (var i = 0; i < themes.length; i++) {
-        if (themes[i] && themes[i].id === mode) {
+        if (themes[i] && themes[i].id === targetId) {
           target = themes[i];
           break;
         }
       }
       if (target && window.CustomTheme && typeof window.CustomTheme.loadTheme === 'function') {
         window.CustomTheme.loadTheme(target);
-        log('theme applied:', mode);
+        log('theme applied:', mode, '→', targetId);
       } else {
-        log('theme not found in BB:', mode);
+        log('theme not found in BB:', targetId);
       }
     } catch (e) {
       log('applyHostTheme failed', e);
     }
   }
 
-  // ---- 5. 语言应用（需 reload）----
+  // ---- 2. 语言应用(需 reload)----
   function applyHostLanguage(code) {
     // 中文 → 'zh',其他一律 'en'
     var bbCode = code && code.toLowerCase().indexOf('zh') === 0 ? 'zh' : 'en';
@@ -172,7 +114,7 @@
     }
   }
 
-  // ---- 6. 项目序列化 / 加载 ----
+  // ---- 3. 项目序列化 / 加载 ----
   function compileCurrentProject() {
     try {
       if (!window.Project || !window.Codecs || !window.Codecs.project) return null;
@@ -193,16 +135,6 @@
       log('compileCurrentProject failed', e);
       return null;
     }
-  }
-
-  function compileSpecificProject(proj) {
-    if (!proj || !window.Codecs || !window.Codecs.project) return null;
-    // BB 的 Codecs.project.compile 默认序列化"当前激活"的 Project,
-    // 切换标签的真正持久化由 host:flush-current 在 select_project 之前完成即可。
-    if (window.Project === proj) {
-      return compileCurrentProject();
-    }
-    return null;
   }
 
   function restoreProjects(projects) {
@@ -241,7 +173,7 @@
     }
   }
 
-  // ---- 7. 事件转发 ----
+  // ---- 4. 事件转发 ----
   function attachBlockbenchListeners() {
     if (!window.Blockbench || typeof window.Blockbench.addListener !== 'function') {
       // 不同 BB 版本可能用 addEventListener
@@ -265,7 +197,6 @@
     });
 
     bb.addListener('select_project', function (data) {
-      // 切换前的项目其实已经由 finish_edit 持续兜底,这里额外发一次事件让 host 端可同步 UI
       var proj = data && data.project ? data.project : window.Project;
       var uuid = proj && proj.uuid ? proj.uuid : '';
       sendToHost('bb:project-switched', { uuid: uuid });
@@ -283,14 +214,12 @@
 
     bb.addListener('load_project', function () {
       if (restoringProjects) return;
-      // 新工程加载后做一次完整持久化(用户从文件菜单导入的场景)
       var dto = compileCurrentProject();
       if (dto) sendToHost('bb:project-saved', { project: dto });
     });
 
     bb.addListener('new_project', function () {
       if (restoringProjects) return;
-      // 新建工程立即占位一行,以便 host 端列表能反映
       var dto = compileCurrentProject();
       if (dto) sendToHost('bb:project-saved', { project: dto });
     });
@@ -298,7 +227,7 @@
     log('Blockbench listeners attached');
   }
 
-  // ---- 8. 接收 host 消息 ----
+  // ---- 5. 接收 host 消息 ----
   function attachMessageListener() {
     window.addEventListener('message', function (event) {
       var data = event.data;
@@ -327,13 +256,12 @@
           break;
         }
         default:
-          // 未知 type,忽略
           break;
       }
     });
   }
 
-  // ---- 9. 监控 BB setup_successful,发送 ready ----
+  // ---- 6. 监控 BB setup_successful,发送 ready ----
   function waitForBlockbenchSetup() {
     var attempts = 0;
     var t = setInterval(function () {
@@ -341,7 +269,6 @@
       if (window.Blockbench && window.Blockbench.setup_successful) {
         clearInterval(t);
         attachBlockbenchListeners();
-        bridgeReady = true;
         sendToHost('bb:ready', {
           version: (window.Blockbench && window.Blockbench.version) || '',
         });
@@ -356,9 +283,6 @@
 
   // ---- 启动序列 ----
   function boot() {
-    injectHostCSS();
-    pinTitle();
-    patchAddStartScreenSection();
     attachMessageListener();
     whenBlockbenchReady(function () {
       waitForBlockbenchSetup();

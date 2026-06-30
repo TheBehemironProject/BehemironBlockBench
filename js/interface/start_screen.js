@@ -5,6 +5,17 @@ import { app, fs } from "../native_apis";
 import { pureMarked } from "../util/util";
 import VersionUtil from '../util/version_util';
 
+// [Behemiron] 检测当前是否嵌入到 Behemiron Workerbench(iframe / popout 窗口),
+// 用来让 web 模式下也显示历史项目列表(默认 v-if="isApp" 会把它隐藏)。
+const isBehemironHosted = (() => {
+	try {
+		return window !== window.top ||
+			new URLSearchParams(window.location.search).get('host') === 'behemiron';
+	} catch (e) {
+		return false;
+	}
+})();
+
 export const StartScreen = {
 	loaders: {},
 	open() {
@@ -184,6 +195,8 @@ onVueSetup(async function() {
 			redacted: tl('generic.redacted'),
 			search_term: '',
 			isApp,
+			// [Behemiron] 暴露给模板,让 "Recent Projects" 区段在 web 模式也能渲染
+			isBehemironHosted,
 			mobile_layout: Blockbench.isMobile,
 			thumbnails: {},
 			getIconNode: Blockbench.getIconNode,
@@ -229,11 +242,25 @@ onVueSetup(async function() {
 				}
 			},
 			openProject: function(p, event) {
+				// [Behemiron] 历史项目走 postMessage 让 host 端从 SQLite 读出完整内容,
+				// 再通过 host:project-open 把 contentJson 灌回来调 Codecs.project.load。
+				if (p && p.behemironHistoryItem) {
+					try {
+						window.parent.postMessage({
+							source: 'behemiron-bb',
+							type: 'bb:open-from-history',
+							payload: { uuid: p.uuid }
+						}, '*');
+					} catch (e) { /* noop */ }
+					return;
+				}
 				Blockbench.read([p.path], {}, files => {
 					loadModelFile(files[0]);
 				})
 			},
 			updateThumbnails(model_paths) {
+				// [Behemiron] web 模式没有本地文件系统,直接跳过(否则 PathModule/fs 报错)
+				if (!isApp) return;
 				this.recent.forEach(project => {
 					if (model_paths && !model_paths.includes(project.path)) return;
 					let hash = project.path.hashCode().toString().replace(/^-/, '0');
@@ -252,6 +279,30 @@ onVueSetup(async function() {
 				StateMemory.save('start_screen_list_type')
 			},
 			recentProjectContextMenu(recent_project, event) {
+				// [Behemiron] 历史项右键菜单仅保留"从历史移除"(走 postMessage 让 host 端 DeleteProject)
+				if (recent_project && recent_project.behemironHistoryItem) {
+					let menu = new Menu('recent_project', [
+						{
+							id: 'remove',
+							name: 'generic.remove',
+							icon: 'clear',
+							click: () => {
+								try {
+									window.parent.postMessage({
+										source: 'behemiron-bb',
+										type: 'bb:project-closed',
+										payload: { uuid: recent_project.uuid }
+									}, '*');
+								} catch (e) { /* noop */ }
+								// 本地立刻移除,host 端确认后会推新历史覆盖
+								const idx = this.recent.indexOf(recent_project);
+								if (idx >= 0) this.recent.splice(idx, 1);
+							}
+						}
+					]);
+					menu.show(event);
+					return;
+				}
 				let menu = new Menu('recent_project', [
 					{
 						id: 'favorite',
@@ -472,8 +523,8 @@ onVueSetup(async function() {
 						</div>
 
 						<div class="start_screen_right" v-else>
-							<h2 v-if="isApp">${tl('mode.start.recent')}</h2>
-							<div id="start_screen_view_menu" v-if="isApp && !redact_names">
+							<h2 v-if="isApp || isBehemironHosted">${tl('mode.start.recent')}</h2>
+							<div id="start_screen_view_menu" v-if="(isApp || isBehemironHosted) && !redact_names">
 								<search-bar :hide="true" v-model="search_term"></search-bar>
 								<li class="tool" v-bind:class="{selected: list_type == 'grid'}" v-on:click="setListType('grid')">
 									<i class="material-icons">view_module</i>

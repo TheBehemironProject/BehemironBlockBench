@@ -854,10 +854,19 @@ BARS.defineActions(function() {
 	codec.export_action = new Action('save_project', {
 		icon: 'save',
 		category: 'file',
-		keybind: new Keybind({key: 's', ctrl: true, alt: true}),
+		// [Behemiron] keybind 改为单纯 Ctrl+S(原 Ctrl+Alt+S)。
+		// host script 的 window keydown 拦截器在它之前接管 Ctrl+S,
+		// 这里的 keybind 让 BB 的快捷键提示界面与实际行为一致。
+		keybind: new Keybind({key: 's', ctrl: true}),
 		condition: () => Project,
 		click: function () {
 			saveTextures(true)
+			// [Behemiron] 嵌入 BehemironIDE 时走 SQLite 持久化,
+			// 不触发浏览器下载(原 codec.export 会触发 Save File 对话框)。
+			if (typeof window.behemironSave === 'function') {
+				window.behemironSave();
+				return;
+			}
 			if (isApp && Project.save_path) {
 				codec.write(codec.compile(), Project.save_path);
 			} else {
@@ -901,6 +910,12 @@ BARS.defineActions(function() {
 		condition: () => Project,
 		click: function () {
 			saveTextures(true)
+			// [Behemiron] "另存为"语义在嵌入态没有 picker(没有本地文件系统),
+			// 退化到与普通保存相同的 SQLite 持久化路径。
+			if (typeof window.behemironSave === 'function') {
+				window.behemironSave();
+				return;
+			}
 			codec.export()
 		}
 	})

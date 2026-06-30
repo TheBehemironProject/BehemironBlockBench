@@ -38,18 +38,23 @@
   // ---- 状态 ----
   var finishEditTimer = null;
   var restoringProjects = false; // 避免恢复时回写
+  var pendingHistory = null; // 收到 host:set-history 时若 Vue 未就绪暂存,稍后填入
 
   // ---- 工具 ----
+  // 默认 console.info,所有节点都打在 DevTools 默认可见级别;
+  // 排查"语言/主题不同步"等问题时直接看 wails webview 的 console。
   function log() {
     // eslint-disable-next-line no-console
     if (typeof console !== 'undefined') {
-      console.debug.apply(console, ['[behemiron-host]'].concat([].slice.call(arguments)));
+      console.info.apply(console, ['[behemiron-host]'].concat([].slice.call(arguments)));
     }
   }
 
   function sendToHost(type, payload) {
     try {
       window.parent.postMessage({ source: 'behemiron-bb', type: type, payload: payload }, '*');
+      // 仅记关键事件,避免高频 finish_edit 刷屏
+      if (type !== 'bb:project-saved') log('send to host:', type);
     } catch (e) {
       log('postMessage failed', e);
     }
@@ -100,14 +105,19 @@
   function applyHostLanguage(code) {
     // 中文 → 'zh',其他一律 'en'
     var bbCode = code && code.toLowerCase().indexOf('zh') === 0 ? 'zh' : 'en';
+    log('applyHostLanguage incoming:', code, '→ bbCode:', bbCode);
     try {
       var raw = window.localStorage.getItem('settings');
       var settings = raw ? JSON.parse(raw) : {};
       if (!settings.language) settings.language = {};
-      if (settings.language.value === bbCode) return; // 已是目标
+      log('current settings.language.value:', settings.language.value, ' want:', bbCode);
+      if (settings.language.value === bbCode) {
+        log('language already at target,skipping reload');
+        return;
+      }
       settings.language.value = bbCode;
       window.localStorage.setItem('settings', JSON.stringify(settings));
-      log('language set,reloading to:', bbCode);
+      log('language set in localStorage, triggering reload to:', bbCode);
       window.location.reload();
     } catch (e) {
       log('applyHostLanguage failed', e);
@@ -173,6 +183,82 @@
     }
   }
 
+  // ---- 接管保存(Ctrl+S 与 Save 按钮共享此入口) ----
+  // 暴露为全局,让 BB 源(bbmodel.js save_project click)能直接调用。
+  function behemironSave() {
+    var dto = compileCurrentProject();
+    if (!dto || !dto.uuid) {
+      log('behemironSave: no project');
+      return;
+    }
+    log('behemironSave: requesting persist for', dto.name || dto.uuid);
+    sendToHost('bb:save-request', { project: dto });
+  }
+  window.behemironSave = behemironSave;
+
+  function setupCtrlSInterceptor() {
+    // 在 capture 阶段拦截,防止 webview 触发"保存网页"下载。
+    // 注意:BB 自己的 save_project action keybind 是 Ctrl+Alt+S,我们这里把
+    // 单纯 Ctrl+S 也接管;两者效果一致。
+    window.addEventListener('keydown', function (e) {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      if (e.shiftKey || e.altKey) return; // 让 Ctrl+Shift+S / Ctrl+Alt+S 走 BB 自己
+      if (e.key !== 's' && e.key !== 'S') return;
+      e.preventDefault();
+      e.stopPropagation();
+      behemironSave();
+    }, true);
+    log('Ctrl+S interceptor installed');
+  }
+
+  // ---- 历史列表 ----
+  // BB start_screen 的 Vue 实例(StartScreen.vue)有个 `recent` 数组,
+  // 我们把 host 推过来的 BlockbenchProjectMeta[] 转成 Vue 期待的形态填进去。
+  function metaToRecentItem(meta) {
+    // BB Vue 模板用:project.path(:key & title) / .name / .icon /
+    // .day(用于 getDate) / .favorite / .uuid(我们附加,用于回点 open)
+    // path 走 'behemiron:<uuid>' 合成,避免空 :key 警告。
+    var fmt = (window.Formats && window.Formats[meta.formatId]) || null;
+    var icon = (fmt && fmt.icon) || 'fa-cubes';
+    var ts = meta.lastSavedAt || meta.lastOpenedAt || 0;
+    var day = ts ? Math.floor(ts / 86400000) : 0;
+    return {
+      path: 'behemiron:' + meta.uuid,
+      uuid: meta.uuid,
+      name: meta.name || '(untitled)',
+      icon: icon,
+      day: day,
+      favorite: false,
+      behemironHistoryItem: true,
+    };
+  }
+
+  function applyHistory(history) {
+    var items = (history || []).map(metaToRecentItem);
+    if (window.StartScreen && window.StartScreen.vue) {
+      window.StartScreen.vue.recent = items;
+      window.StartScreen.vue.$forceUpdate();
+      log('history applied to start_screen,count=', items.length);
+    } else {
+      // Vue 还未挂载,暂存待会儿补
+      pendingHistory = items;
+      log('history pending,Vue not ready,count=', items.length);
+    }
+  }
+
+  function flushPendingHistoryWhenReady() {
+    if (!pendingHistory) return;
+    var t = setInterval(function () {
+      if (window.StartScreen && window.StartScreen.vue) {
+        clearInterval(t);
+        window.StartScreen.vue.recent = pendingHistory;
+        window.StartScreen.vue.$forceUpdate();
+        log('pending history applied,count=', pendingHistory.length);
+        pendingHistory = null;
+      }
+    }, 100);
+  }
+
   // ---- 4. 事件转发 ----
   function attachBlockbenchListeners() {
     if (!window.Blockbench || typeof window.Blockbench.addListener !== 'function') {
@@ -233,6 +319,7 @@
       var data = event.data;
       if (!data || typeof data !== 'object') return;
       if (data.source !== 'behemiron-host') return;
+      log('recv from host:', data.type, data.payload);
 
       switch (data.type) {
         case 'host:theme':
@@ -255,6 +342,20 @@
           });
           break;
         }
+        case 'host:set-history':
+          applyHistory(data.payload && data.payload.history);
+          break;
+        case 'host:save-ack': {
+          var ok = data.payload && data.payload.ok;
+          var uuid = data.payload && data.payload.uuid;
+          if (ok && window.Project && window.Project.uuid === uuid) {
+            window.Project.saved = true;
+            if (window.Blockbench && typeof window.Blockbench.showQuickMessage === 'function') {
+              window.Blockbench.showQuickMessage('Saved to Behemiron', 1500);
+            }
+          }
+          break;
+        }
         default:
           break;
       }
@@ -269,9 +370,13 @@
       if (window.Blockbench && window.Blockbench.setup_successful) {
         clearInterval(t);
         attachBlockbenchListeners();
+        setupCtrlSInterceptor();
         sendToHost('bb:ready', {
           version: (window.Blockbench && window.Blockbench.version) || '',
         });
+        // 立即请求历史列表
+        sendToHost('bb:request-history', {});
+        flushPendingHistoryWhenReady();
         log('BB ready,bridge online');
       } else if (attempts > 600) {
         // 30s 还没 setup,放弃但仍可接收 host 消息(主题/语言)

@@ -1297,6 +1297,7 @@
 	"menu.locator.ignore_inherited_scale": "忽略继承的比例",
 	"menu.texture.elements": "应用到元素",
 	"uv_editor.transparent_face": "透明面",
+	"uv_editor.too_many_selected": "另有 %0 个元素未渲染 — UV 已为大量选择降级以保性能",
 	"display.pose_angle": "姿势角度（仅用于预览）",
 	"data.mesh": "网格",
 	"dialog.create_texture.type": "类型",

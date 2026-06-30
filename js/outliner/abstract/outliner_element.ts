@@ -2,6 +2,81 @@ import { Blockbench } from "../../api";
 import { Property } from "../../util/property";
 import { OutlinerNode } from "./outliner_node";
 
+// ============================================================================
+// Perf(Behemiron): cache `Cube.selected` / `Mesh.selected` / etc. to break the
+// O(N^2) Vue patch storm that pegs the main thread at ~2 fps when many cubes
+// are selected.
+//
+// Before: every access to `Cube.selected` (a static getter on each element
+// constructor) ran `Project.selected_elements.find(...)` followed by
+// `Project.selected_elements.filter(...)`  — two full O(N) scans  — and
+// returned a brand new array every time. The Outliner panel binds
+// `Cube.selected` (and friends) in a Vue template that is repeated per
+// element, so a single Vue patch evaluated this getter ~N times while
+// holding an O(N) selection. Result: 4000 elements × 4000 patches × 4000-item
+// scans + 4000 throw-away arrays  → a single 19.9 s `insertBefore` task
+// (visible in the Performance flame chart at outliner_element.ts:298).
+//
+// Now: a WeakMap keyed by the live `Project.selected_elements` array stores
+// the per-constructor subset; we mutate-instrument that array so push/splice/
+// remove/empty/etc. invalidate the cache automatically. Vue reactivity stays
+// correct because:
+//   1. reads still touch `sel.length`, so Vue's dep-tracker registers the
+//      dependency on the underlying reactive array,
+//   2. when a mutation happens we delete the cache entry  → next read returns
+//      a freshly built array (new reference)  → Vue sees the change.
+// Cache-hit cost is O(1); cache-miss cost is a single O(N) scan instead of
+// two.
+// ============================================================================
+const _selectedSubsetCache = new WeakMap<any[], Map<Function, any[]>>();
+const _EMPTY_SELECTED: any[] = Object.freeze([]) as any;
+const _MUTATING_METHODS = [
+	'push', 'pop', 'shift', 'unshift', 'splice',
+	'safePush', 'remove', 'empty',
+	'sort', 'reverse', 'fill', 'copyWithin',
+];
+
+function _instrumentSelectedArray(arr: any[]): void {
+	if ((arr as any).__behemiron_instrumented) return;
+	Object.defineProperty(arr, '__behemiron_instrumented', {
+		value: true, enumerable: false, configurable: true, writable: false,
+	});
+	for (const m of _MUTATING_METHODS) {
+		const orig = (arr as any)[m];
+		if (typeof orig !== 'function') continue;
+		Object.defineProperty(arr, m, {
+			value: function (this: any[], ...args: any[]) {
+				_selectedSubsetCache.delete(arr);
+				return orig.apply(this, args);
+			},
+			writable: true, configurable: true, enumerable: false,
+		});
+	}
+}
+
+function _selectedSubsetFor(constructor: Function): any[] {
+	const sel: any[] | undefined = (typeof Project !== 'undefined' && Project)
+		? Project.selected_elements
+		: undefined;
+	if (!sel) return _EMPTY_SELECTED;
+	_instrumentSelectedArray(sel);
+	if (!sel.length) return _EMPTY_SELECTED;
+	let perArr = _selectedSubsetCache.get(sel);
+	if (!perArr) {
+		perArr = new Map();
+		_selectedSubsetCache.set(sel, perArr);
+	}
+	const cached = perArr.get(constructor);
+	if (cached) return cached;
+	const arr: any[] = [];
+	for (let i = 0; i < sel.length; i++) {
+		const el = sel[i];
+		if (el instanceof constructor) arr.push(el);
+	}
+	perArr.set(constructor, arr);
+	return arr;
+}
+
 type ElementTypeConstructor = {
 	new (...args: any[]): OutlinerElement,
 	init?(): void,
@@ -294,11 +369,12 @@ export abstract class OutlinerElement extends OutlinerNode {
 				console.warn('You cannot modify this')
 			}
 		})
+		// Perf(Behemiron): see the cache helper at the top of this file.
+		// Was: find() + filter() double-scan + fresh array on every read.
+		// Now: cached subset, O(1) on hit, mutation-instrumented invalidation.
 		Object.defineProperty(constructor, 'selected', {
 			get() {
-				return (Project.selected_elements?.length && Project.selected_elements.find(element => element instanceof constructor))
-					 ? Project.selected_elements.filter(element => element instanceof constructor)
-					 : [];
+				return _selectedSubsetFor(constructor);
 			},
 			set(group) {
 				console.warn('You cannot modify this')

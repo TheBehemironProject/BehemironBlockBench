@@ -106,8 +106,12 @@ export function updateNslideValues() {
 //Selections
 export function updateSelection(options = {}) {
 	if (!Project) return;
+	// Perf(Behemiron Q3): cache O(1) lookup sets so selectAll / large multi-select stops being
+	// O(N * M) on the two Array.includes() hot paths below.
+	const selectedElementsSet = new Set(Project.selected_elements);
+	const elementsSet = new Set(Project.elements);
 	Project.elements.forEach(obj => {
-		let included = Project.selected_elements.includes(obj);
+		let included = selectedElementsSet.has(obj);
 		if (included && !obj.selected && !obj.locked) {
 			obj.markAsSelected()
 		} else if ((!included || obj.locked) && obj.selected) {
@@ -163,7 +167,7 @@ export function updateSelection(options = {}) {
 		}
 	})
 	for (var i = Outliner.selected.length-1; i >= 0; i--) {
-		if (!Project.elements.includes(Outliner.selected[i])) {
+		if (!elementsSet.has(Outliner.selected[i])) {
 			Outliner.selected.splice(i, 1)
 		}
 	}

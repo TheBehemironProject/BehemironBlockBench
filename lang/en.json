@@ -2734,6 +2734,7 @@
 	"uv_editor.copy_selection": "Copy Selection",
 	"uv_editor.paste_selection": "Paste Selection",
 	"uv_editor.transparent_face": "Transparent Face",
+	"uv_editor.too_many_selected": "%0 more elements hidden — UV rendering capped for performance",
 
 	"uv_editor.copy_paste_tool.place": "Place",
 	"uv_editor.copy_paste_tool.to_layer": "To New Layer",

@@ -43,10 +43,11 @@ export const Canvas = {
 	gizmos: [],
 	show_gizmos: true,
 	ground_animation: false,
+	// Perf(Behemiron Q1): linewidth in WebGL is locked to 1 and `transparent: true` only forces the
+	// material into the depth-sorted transparent queue without any visual benefit (color has no alpha).
+	// Dropping both turns N selected-cube outlines into opaque-queue draws and skips per-frame sorting.
 	outlineMaterial: new THREE.LineBasicMaterial({
-		linewidth: 2,
 		depthTest: settings.seethrough_outline.value == false,
-		transparent: true,
 		color: gizmo_colors.outline
 	}),
 	splinePathLineMaterial: new THREE.LineBasicMaterial({

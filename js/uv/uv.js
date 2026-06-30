@@ -83,6 +83,14 @@ function rotateImageDataByDegrees(imageData, degrees) {
 }
 
 
+// Behemiron perf: 全选 4000+ cube 时 UV editor 会把每个 face 都展成 DOM（4133 × 6 ≈ 6 万节点）,
+// 每一次任何属性变化都触发 layout 几十毫秒甚至几百毫秒,直接把 fps 打到个位数。
+// 这里给"渲染层"加个上限,超过就只渲染前 N 个元素,其余以提示条形式呈现。
+// BB 的选择状态与 UV 操作（move/scale/rotate）不依赖 DOM,因此截断只损失"可视化全部 face"
+// 这个细节体验,而不损失任何选择 / 编辑 / 撤销语义。
+const UV_RENDER_ELEMENT_CAP = 50;
+
+
 export const UVEditor = {
 	face: 'north',
 	size: 320,
@@ -4119,12 +4127,25 @@ Interface.definePanels(function() {
 				},
 				getDisplayedUVElements() {
 					if (this.mode == 'uv' || this.uv_overlay) {
-						return (this.display_uv === 'all_elements' || this.mode == 'paint')
+						let list = (this.display_uv === 'all_elements' || this.mode == 'paint')
 							 ? this.all_mappable_elements
 							 : this.mappable_elements;
+						// Behemiron perf cap: 海量选择时只渲染前 N 个,避免 DOM 爆炸
+						if (list.length > UV_RENDER_ELEMENT_CAP) {
+							return list.slice(0, UV_RENDER_ELEMENT_CAP);
+						}
+						return list;
 					} else {
 						return [];
 					}
+				},
+				// Behemiron perf: 给模板用的"溢出数量",非零时显示提示条
+				getDisplayedUVElementOverflow() {
+					if (this.mode != 'uv' && !this.uv_overlay) return 0;
+					let total = ((this.display_uv === 'all_elements' || this.mode == 'paint')
+						 ? this.all_mappable_elements
+						 : this.mappable_elements).length;
+					return Math.max(0, total - UV_RENDER_ELEMENT_CAP);
 				},
 				getMeshFaceOutline(face) {
 					let coords = [];
@@ -5022,6 +5043,11 @@ Interface.definePanels(function() {
 								</template>
 
 							</template>
+
+							<div class="uv_render_overflow_hint" v-if="getDisplayedUVElementOverflow() > 0">
+								<i class="material-icons" style="font-size: 16px; vertical-align: middle; margin-right: 4px;">speed</i>
+								{{ tl('uv_editor.too_many_selected', [getDisplayedUVElementOverflow()]) }}
+							</div>
 
 							<div id="uv_selection_frame" v-if="mode == 'uv' && isScalingAvailable()" :style="getUVSelectionFrameStyle()">
 								<div id="uv_rotate_handle" v-if="isRotatingAvailable()"

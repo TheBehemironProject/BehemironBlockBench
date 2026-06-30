@@ -5,7 +5,15 @@ import { Setting, Settings, SettingsProfile } from "./settings";
 import { addStartScreenSection } from "./start_screen";
 
 function setupSettings() {
-	if (localStorage.getItem('settings') != null) {
+	// [Behemiron] 嵌入态优先用 Wails AssetService 注入的 settings(早于 bundle.js,
+	// 跳过 localStorage 的写入时序/被覆盖问题)。
+	if (window.__BEHEMIRON_BB_SETTINGS__ && typeof window.__BEHEMIRON_BB_SETTINGS__ === 'object') {
+		Settings.stored = window.__BEHEMIRON_BB_SETTINGS__;
+		// 同步回 localStorage,这样其他依赖 localStorage 的代码也能拿到一致视图
+		try {
+			localStorage.setItem('settings', JSON.stringify(Settings.stored));
+		} catch (e) { /* noop */ }
+	} else if (localStorage.getItem('settings') != null) {
 		Settings.stored = JSON.parse(localStorage.getItem('settings'));
 	}
 	

@@ -129,10 +129,20 @@ export const Language = {
 
 
 // Get language code
-let code;
+// [Behemiron] 优先用 Wails AssetService 注入的 settings,避开 localStorage 的
+// 时序问题(`localStorage.setItem` + reload 在 webview 里曾出现写不持久的情况)。
+let code: string | undefined;
 try {
-	code = JSON.parse(localStorage.getItem('settings')).language.value
+	const injected = (window as any).__BEHEMIRON_BB_SETTINGS__;
+	if (injected && injected.language && typeof injected.language.value === 'string') {
+		code = injected.language.value;
+	}
 } catch (err) {}
+if (!code) {
+	try {
+		code = JSON.parse(localStorage.getItem('settings')!).language.value
+	} catch (err) {}
+}
 
 if (!code) {
 	code = navigator.language.replace(/-\w+/, '')

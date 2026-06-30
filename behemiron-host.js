@@ -101,28 +101,31 @@
     }
   }
 
-  // ---- 2. 语言应用(需 reload)----
-  function applyHostLanguage(code) {
-    // 中文 → 'zh',其他一律 'en'
-    var bbCode = code && code.toLowerCase().indexOf('zh') === 0 ? 'zh' : 'en';
-    log('applyHostLanguage incoming:', code, '→ bbCode:', bbCode);
+  // ---- 2. 语言:由 AssetService 注入 + BB 源码直接读取 ----
+  // 不再用 postMessage 触发 reload 写 localStorage 的方式 —— 不可靠(BB 在
+  // saveLocalStorages 时会用自己当前值覆盖)。统一架构:
+  //   1. host:set-bb-language → host 收到 → 调 behemironRequestReload(由 parent
+  //      负责把 KV 'settings'.language.value 改好,然后改 iframe.src 或调 reload)
+  //   2. 实际语言切换的"权威源"是 SQLite blockbench_kv key='settings',
+  //      由 AssetService 在 serve index.html 时注入到 window.__BEHEMIRON_BB_SETTINGS__
+  //      → BB setup_settings.js 读到。
+  //
+  // 收到 host:reload 时简单 location.reload(让 AssetService 重新注入新值)。
+  function applyHostReload() {
+    log('host requested iframe reload');
     try {
-      var raw = window.localStorage.getItem('settings');
-      var settings = raw ? JSON.parse(raw) : {};
-      if (!settings.language) settings.language = {};
-      log('current settings.language.value:', settings.language.value, ' want:', bbCode);
-      if (settings.language.value === bbCode) {
-        log('language already at target,skipping reload');
-        return;
-      }
-      settings.language.value = bbCode;
-      window.localStorage.setItem('settings', JSON.stringify(settings));
-      log('language set in localStorage, triggering reload to:', bbCode);
       window.location.reload();
     } catch (e) {
-      log('applyHostLanguage failed', e);
+      log('reload failed', e);
     }
   }
+
+  // ---- 2b. BB → host 镜像:settings 写回 SQLite ----
+  // BB 源码的 Settings.saveLocalStorages 会调这个,把整个 settings 推给 parent。
+  // parent 端写到 SQLite,下次 boot 由 AssetService 注入回来。
+  window.behemironPostSettings = function (settingsCopy) {
+    sendToHost('bb:settings-changed', { settings: settingsCopy });
+  };
 
   // ---- 3. 项目序列化 / 加载 ----
   function compileCurrentProject() {
@@ -325,8 +328,10 @@
         case 'host:theme':
           applyHostTheme(data.payload && data.payload.mode);
           break;
-        case 'host:language':
-          applyHostLanguage(data.payload && data.payload.code);
+        case 'host:reload':
+          // 用于 Behemiron 改了 settings/embeddedTools 的语言之后,
+          // 让 BB iframe 整体 reload,AssetService 会把新 settings 注入回来。
+          applyHostReload();
           break;
         case 'host:projects-restore':
           restoreProjects(data.payload && data.payload.projects);
@@ -388,8 +393,27 @@
 
   // ---- 启动序列 ----
   function boot() {
+    // 诊断:启动时立即读 localStorage.settings,确认 BB 即将以什么语言 boot
+    try {
+      var rawSettings = window.localStorage.getItem('settings');
+      var parsedLang = '(no settings key)';
+      if (rawSettings) {
+        var s = JSON.parse(rawSettings);
+        parsedLang = (s && s.language && s.language.value) || '(no language.value)';
+      }
+      log('boot: localStorage.settings.language.value =', parsedLang,
+          ' | navigator.language =', navigator.language);
+    } catch (e) {
+      log('boot: failed to read settings', e);
+    }
+
     attachMessageListener();
     whenBlockbenchReady(function () {
+      // BB 全局就绪后,立即 log 它实际选定的 Language.code
+      try {
+        log('Blockbench global ready: Language.code =',
+            (window.Language && window.Language.code) || '(unset)');
+      } catch (e) { /* noop */ }
       waitForBlockbenchSetup();
     });
     log('host script booted');

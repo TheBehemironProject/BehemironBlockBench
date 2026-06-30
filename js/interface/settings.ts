@@ -490,6 +490,15 @@ export const Settings = {
 		localStorage.setItem('settings', JSON.stringify(settings_copy) )
 		localStorage.setItem('settings_profiles', JSON.stringify(SettingsProfile.all));
 
+		// [Behemiron] 把整个 settings 镜像到 host,host 写到 SQLite 让下次 boot
+		// 通过 AssetService 注入回来。这样 BB 自己改了 settings(比如设置 dialog)
+		// 也能让 Behemiron 那边的"嵌入工具"设置同步。
+		// @ts-ignore
+		if (typeof window.behemironPostSettings === 'function') {
+			// @ts-ignore
+			window.behemironPostSettings(settings_copy);
+		}
+
 		// @ts-ignore
 		if (window.ColorPanel) ColorPanel.saveLocalStorages()
 	},

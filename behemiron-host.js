@@ -172,10 +172,29 @@
   // 给刚加载的 Project 强制恢复稳定 uuid。
   // BB Codecs.project.load 不会从 model 拿 uuid,默认给新工程生成新 uuid。
   // 必须 load 完后立即手动 set,确保后续 save 命中同一个 DB 行(upsert)。
+  //
+  // **关键**:ModelProject 构造时用当时的 uuid 在全局 ProjectData 字典里
+  // 创建条目(model_3d: THREE.Object3D / nodes_3d: {}),而 Project 类的
+  // model_3d / nodes_3d getter 是 `ProjectData[this.uuid].model_3d` 这种
+  // 写法。一旦我们改了 Project.uuid 而不同步迁移 ProjectData 的 key,
+  // unselect()/close() 里 `scene.remove(this.model_3d)` 等就会读到
+  // undefined 而抛 "Cannot read properties of undefined (reading 'model_3d')"。
+  // 这里把旧 key 改名到新 key,完整保留已绑定的 THREE 节点。
   function rebindProjectUuid(stableUuid) {
     if (!stableUuid) return;
     if (window.Project && window.Project.uuid !== stableUuid) {
+      var oldUuid = window.Project.uuid;
       window.Project.uuid = stableUuid;
+      try {
+        if (window.ProjectData && Object.prototype.hasOwnProperty.call(window.ProjectData, oldUuid)) {
+          // 旧 key 已存在新 key 可能也存在(罕见,但容错):优先保留旧的实际数据,
+          // 因为新 key 极可能是空壳(构造函数路径以外的字段访问会触发懒创建)。
+          window.ProjectData[stableUuid] = window.ProjectData[oldUuid];
+          delete window.ProjectData[oldUuid];
+        }
+      } catch (e) {
+        log('rebindProjectUuid: ProjectData migrate failed', e);
+      }
     }
   }
 

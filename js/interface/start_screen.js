@@ -279,22 +279,25 @@ onVueSetup(async function() {
 				StateMemory.save('start_screen_list_type')
 			},
 			recentProjectContextMenu(recent_project, event) {
-				// [Behemiron] 历史项右键菜单仅保留"从历史移除"(走 postMessage 让 host 端 DeleteProject)
+				// [Behemiron] 历史项右键菜单仅保留"从历史永久移除"
+				// 走 bb:delete-from-history(host 端 BlockbenchService.deleteProject,
+				// 真删 DB 行)。不要发 bb:project-closed —— 那只是 setOpenSession=false,
+				// 行仍保留,造成"删除无效"。
 				if (recent_project && recent_project.behemironHistoryItem) {
 					let menu = new Menu('recent_project', [
 						{
 							id: 'remove',
 							name: 'generic.remove',
-							icon: 'clear',
+							icon: 'delete',
 							click: () => {
 								try {
 									window.parent.postMessage({
 										source: 'behemiron-bb',
-										type: 'bb:project-closed',
+										type: 'bb:delete-from-history',
 										payload: { uuid: recent_project.uuid }
 									}, '*');
 								} catch (e) { /* noop */ }
-								// 本地立刻移除,host 端确认后会推新历史覆盖
+								// 本地立刻移除,host 端 deleteProject 后会推新 history 覆盖
 								const idx = this.recent.indexOf(recent_project);
 								if (idx >= 0) this.recent.splice(idx, 1);
 							}

@@ -128,14 +128,28 @@
   };
 
   // ---- 3. 项目序列化 / 加载 ----
-  function compileCurrentProject() {
+  // 返回 null 时表示"不应持久化"。两类情况:
+  //   - Project / Codecs 未就绪
+  //   - 工程未命名(name 空字符串或 'noname')—— 用户没有主动命名,任何
+  //     自动保存(finish_edit 防抖)都不应该把它写进 SQLite,避免新建即
+  //     编辑就堆出一堆 noname 历史项
+  function compileCurrentProject(opts) {
+    opts = opts || {};
     try {
       if (!window.Project || !window.Codecs || !window.Codecs.project) return null;
+      var name = window.Project.name || '';
+      var isNamed = name && name.trim() && name.trim() !== 'noname';
+      // explicit save(Ctrl+S / Save Project)允许未命名:用户主动按了保存,
+      // 这种情况下我们仍然 persist,后续 BB 会让用户在保存对话框里命名(实际上
+      // BB 在嵌入态没对话框,但 finish_edit 自动保存才是堆积罪魁)
+      if (!opts.allowUnnamed && !isNamed) {
+        return null;
+      }
       var json = window.Codecs.project.compile({ raw: true });
       var content = typeof json === 'string' ? json : JSON.stringify(json);
       return {
         uuid: window.Project.uuid || '',
-        name: window.Project.name || '',
+        name: name,
         formatId: (window.Project.format && window.Project.format.id) || '',
         contentJson: content,
         thumbnailBase64: '',
@@ -188,10 +202,22 @@
 
   // ---- 接管保存(Ctrl+S 与 Save 按钮共享此入口) ----
   // 暴露为全局,让 BB 源(bbmodel.js save_project click)能直接调用。
+  //
+  // **未命名工程拒绝保存**:防止 noname 项堆积历史。
+  // 让用户先在 BB 的"工程信息"对话框里命名再保存。
   function behemironSave() {
     var dto = compileCurrentProject();
     if (!dto || !dto.uuid) {
-      log('behemironSave: no project');
+      var isUnnamed = window.Project && (!window.Project.name ||
+                                          window.Project.name.trim() === '' ||
+                                          window.Project.name.trim() === 'noname');
+      if (isUnnamed && window.Blockbench && typeof window.Blockbench.showQuickMessage === 'function') {
+        window.Blockbench.showQuickMessage(
+          window.tl ? window.tl('message.behemiron_name_required') || 'Name the project before saving' : 'Name the project before saving',
+          2200
+        );
+      }
+      log('behemironSave: skipped (no project or unnamed)');
       return;
     }
     log('behemironSave: requesting persist for', dto.name || dto.uuid);

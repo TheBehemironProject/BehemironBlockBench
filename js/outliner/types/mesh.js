@@ -639,14 +639,19 @@ export class Mesh extends OutlinerElement {
 		return el;
 	}
 	getSelectedVertices(make) {
+		// [Behemiron] 加 Project?. 防御:Project 在切换/加载瞬间可能为空,
+		// Vue 渲染如果命中 isFaceSelected 等方法会因 undefined.mesh_selection 整体崩溃。
+		if (!Project) return [];
 		if (make && !Project.mesh_selection[this.uuid]) Project.mesh_selection[this.uuid] = {vertices: [], edges: [], faces: []};
 		return Project.mesh_selection[this.uuid]?.vertices || [];
 	}
 	getSelectedEdges(make) {
+		if (!Project) return [];
 		if (make && !Project.mesh_selection[this.uuid]) Project.mesh_selection[this.uuid] = {vertices: [], edges: [], faces: []};
 		return Project.mesh_selection[this.uuid]?.edges || [];
 	}
 	getSelectedFaces(make) {
+		if (!Project) return [];
 		if (make && !Project.mesh_selection[this.uuid]) Project.mesh_selection[this.uuid] = {vertices: [], edges: [], faces: []};
 		return Project.mesh_selection[this.uuid]?.faces || [];
 	}

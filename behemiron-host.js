@@ -217,20 +217,30 @@
   // ---- 历史列表 ----
   // BB start_screen 的 Vue 实例(StartScreen.vue)有个 `recent` 数组,
   // 我们把 host 推过来的 BlockbenchProjectMeta[] 转成 Vue 期待的形态填进去。
+  // BB getDate 期望 p.day 是 day-of-year(1-365),
+  // 不是 epoch 天数。这里用同样的算法转换 ts → dayOfYear,与 BB util.js 的
+  // Date.prototype.dayOfYear 行为一致(从当年 1 月 1 日起算)。
+  function tsToDayOfYear(ts) {
+    if (!ts) return 0;
+    var d = new Date(ts);
+    var start = new Date(d.getFullYear(), 0, 0); // 1月0日 = 上年最后一天
+    var oneDay = 86400000;
+    return Math.floor((d - start) / oneDay);
+  }
+
   function metaToRecentItem(meta) {
     // BB Vue 模板用:project.path(:key & title) / .name / .icon /
-    // .day(用于 getDate) / .favorite / .uuid(我们附加,用于回点 open)
+    // .day(用于 getDate,day-of-year) / .favorite / .uuid(我们附加,用于回点 open)
     // path 走 'behemiron:<uuid>' 合成,避免空 :key 警告。
     var fmt = (window.Formats && window.Formats[meta.formatId]) || null;
     var icon = (fmt && fmt.icon) || 'fa-cubes';
     var ts = meta.lastSavedAt || meta.lastOpenedAt || 0;
-    var day = ts ? Math.floor(ts / 86400000) : 0;
     return {
       path: 'behemiron:' + meta.uuid,
       uuid: meta.uuid,
       name: meta.name || '(untitled)',
       icon: icon,
-      day: day,
+      day: tsToDayOfYear(ts),
       favorite: false,
       behemironHistoryItem: true,
     };

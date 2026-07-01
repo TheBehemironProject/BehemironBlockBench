@@ -1,6 +1,7 @@
 import { editUVSizeDialog } from "./uv_size";
 import { PointerTarget } from "../interface/pointer_target";
 import { dragHelper } from "../util/drag_helper";
+import { createUVGLScene } from "./gl/UVGLScene.js";
 
 // Image manipulation helpers for UV+texture transforms
 function flipImageDataH(imageData) {
@@ -83,12 +84,16 @@ function rotateImageDataByDegrees(imageData, degrees) {
 }
 
 
-// Behemiron perf: 全选 4000+ cube 时 UV editor 会把每个 face 都展成 DOM（4133 × 6 ≈ 6 万节点）,
-// 每一次任何属性变化都触发 layout 几十毫秒甚至几百毫秒,直接把 fps 打到个位数。
-// 这里给"渲染层"加个上限,超过就只渲染前 N 个元素,其余以提示条形式呈现。
-// BB 的选择状态与 UV 操作（move/scale/rotate）不依赖 DOM,因此截断只损失"可视化全部 face"
-// 这个细节体验,而不损失任何选择 / 编辑 / 撤销语义。
-const UV_RENDER_ELEMENT_CAP = 50;
+// Behemiron GL: cube_uv_face 本体已迁到 canvas(FaceLayer),resize/rotate 手柄保留 DOM
+// (交互逻辑复杂,数量天然受"当前选中面数"限制,不像 face 本体会随"全选"线性爆炸,
+// 继续迁 canvas 收益有限、风险不小,GL 化到此为止,手柄长期保持 DOM 是既定设计而非待办)。
+// 这里单独给手柄加一个上限,防止"选中几千个面"这种边缘场景把手柄 DOM 也打爆——
+// 超限时仍可通过 #uv_selection_frame 的整体 scale/rotate 完成批量操作。
+const UV_HANDLE_RENDER_CAP = 200;
+
+// Behemiron GL: mesh_uv_face 本体(多边形)已迁 canvas(Sprint 2),顶点手柄同理仍是 DOM,
+// 独立上限,单位是"选中的 mesh face 数"(每个 face 展开出它自己的顶点手柄)。
+const UV_MESH_HANDLE_RENDER_CAP = 200;
 
 
 export const UVEditor = {
@@ -2769,6 +2774,9 @@ Interface.definePanels(function() {
 				all_elements: [],
 				display_uv: settings.display_uv.value,
 				selection_outline: '',
+				// Behemiron GL: pointer 悬停的面 key(格式: uuid + ':' + face_key),由 UVGLEvents.js
+				// 的 pointermove 写入,驱动 FaceLayer/OutlineLayer/MeshFaceLayer/MeshOutlineLayer 的 HOVER 状态色
+				hover_key: null,
 
 				face_names: {
 					north: tl('face.north'),
@@ -4127,25 +4135,66 @@ Interface.definePanels(function() {
 				},
 				getDisplayedUVElements() {
 					if (this.mode == 'uv' || this.uv_overlay) {
-						let list = (this.display_uv === 'all_elements' || this.mode == 'paint')
+						return (this.display_uv === 'all_elements' || this.mode == 'paint')
 							 ? this.all_mappable_elements
 							 : this.mappable_elements;
-						// Behemiron perf cap: 海量选择时只渲染前 N 个,避免 DOM 爆炸
-						if (list.length > UV_RENDER_ELEMENT_CAP) {
-							return list.slice(0, UV_RENDER_ELEMENT_CAP);
-						}
-						return list;
 					} else {
 						return [];
 					}
 				},
-				// Behemiron perf: 给模板用的"溢出数量",非零时显示提示条
-				getDisplayedUVElementOverflow() {
-					if (this.mode != 'uv' && !this.uv_overlay) return 0;
-					let total = ((this.display_uv === 'all_elements' || this.mode == 'paint')
-						 ? this.all_mappable_elements
-						 : this.mappable_elements).length;
-					return Math.max(0, total - UV_RENDER_ELEMENT_CAP);
+				// Behemiron GL: 拍平出"当前应显示 resize/rotate 手柄"的 (element, key, face) 列表,
+				// 上限见 UV_HANDLE_RENDER_CAP。只在 mode=='uv' 时启用(paint/uv_overlay 不需要手柄)。
+				getUVFaceHandleEntries() {
+					if (this.mode != 'uv') return [];
+					let entries = [];
+					let elements = this.getDisplayedUVElements();
+					for (let i = 0; i < elements.length; i++) {
+						let element = elements[i];
+						if (!element.getTypeBehavior || !element.getTypeBehavior('cube_faces') || element.box_uv) continue;
+						if (this.display_uv === 'all_elements' && !this.mappable_elements.includes(element)) continue;
+						for (let key in element.faces) {
+							let face = element.faces[key];
+							if (!face || face.texture === null) continue;
+							if (!(face.getTexture() == this.texture || this.texture == 0)) continue;
+							if (!this.isFaceSelected(element, key)) continue;
+							entries.push({element, key, face});
+							if (entries.length >= UV_HANDLE_RENDER_CAP) return entries;
+						}
+					}
+					return entries;
+				},
+				// Behemiron GL: 拍平出"当前应显示顶点手柄"的 (element, key, face) 列表(mesh_uv_face),
+				// 上限见 UV_MESH_HANDLE_RENDER_CAP。只在 mode=='uv' 时启用,复刻原模板
+				// `mode == 'uv' && isFaceSelected(element, key)` 的条件。
+				getMeshVertexHandleEntries() {
+					if (this.mode != 'uv') return [];
+					let entries = [];
+					let elements = this.getDisplayedUVElements();
+					for (let i = 0; i < elements.length; i++) {
+						let element = elements[i];
+						if (!element || element.type != 'mesh') continue;
+						let faces = this.filterMeshFaces(element);
+						for (let key in faces) {
+							let face = faces[key];
+							if (!face || !face.vertices || face.vertices.length <= 2) continue;
+							if (!(face.getTexture() == this.texture)) continue;
+							if (!this.isFaceSelected(element, key)) continue;
+							entries.push({element, key, face});
+							if (entries.length >= UV_MESH_HANDLE_RENDER_CAP) return entries;
+						}
+					}
+					return entries;
+				},
+				// Behemiron GL: lazy 初始化 UVGLScene(refs 出现即绑定,texture=null 时 #uv_frame 不渲染,等下次 update)
+				_ensureGL() {
+					if (this._gl) return;
+					const frame = this.$refs.frame;
+					const canvas = this.$refs.gl_canvas;
+					if (!frame || !canvas) return;
+					this._gl = createUVGLScene({ container: frame, canvas, vue: this });
+				},
+				scheduleGLRedraw() {
+					if (this._gl) this._gl.scheduleRedraw();
 				},
 				getMeshFaceOutline(face) {
 					let coords = [];
@@ -4832,6 +4881,35 @@ Interface.definePanels(function() {
 						message: tl(text),
 						icon: 'info'
 					})
+				},
+				// Behemiron GL: 面板折叠/切到其它 tab 时,#uv_viewport 的 v-if="!hidden && mode
+				// !== 'face_properties'" 会把 canvas 从 DOM 里摘掉,但 this._gl 持有的
+				// WebGLRenderer/ResizeObserver/事件监听是普通 JS 对象,并不会因为 DOM 节点消失
+				// 而自动释放 —— updated() 每次触发依然会 scheduleRedraw(),在后台对着一个已经
+				// 从 DOM 摘掉的 canvas 持续 render(),白白抢占主线程/GPU,拖慢主 3D 预览。
+				// 用跟 #uv_viewport 完全一致的条件判断"当前是否真的可见"。
+				// 注意: 这个方法必须放在 methods 里(跟 mounted/updated 平级会导致 Vue 不认得
+				// 这个 key,this._isGLVisible 变成 undefined,调用时直接抛 TypeError)。
+				_isGLVisible() {
+					return !this.hidden && this.mode !== 'face_properties';
+				}
+			},
+			mounted() {
+				if (this._isGLVisible()) this._ensureGL();
+			},
+			updated() {
+				if (this._isGLVisible()) {
+					this._ensureGL();
+					if (this._gl) this._gl.scheduleRedraw();
+				} else if (this._gl) {
+					this._gl.dispose();
+					this._gl = null;
+				}
+			},
+			beforeDestroy() {
+				if (this._gl) {
+					this._gl.dispose();
+					this._gl = null;
 				}
 			},
 			template: `
@@ -4960,93 +5038,52 @@ Interface.definePanels(function() {
 						>
 							<div id="uv_frame_spacer" :style="{left: (inner_width+getFrameMargin()[0])+'px', top: (inner_height+getFrameMargin()[1])+'px'}"></div>
 
-							<template v-for="element in getDisplayedUVElements()">
+							<!-- Behemiron GL: cube_uv_face / box_uv / mesh_uv_face 全部由 UVGLScene(canvas) 渲染,DOM 不再展开 -->
+							<canvas ref="gl_canvas" class="uv_gl_canvas"></canvas>
 
-								<template v-if="element.getTypeBehavior('cube_faces') && !element.box_uv">
-									<div class="cube_uv_face uv_face"
-										v-for="(face, key) in element.faces" :key="element.uuid + ':' + key"
-										v-if="(face.getTexture() == texture || texture == 0) && face.texture !== null && (display_uv !== 'selected_faces' || mode == 'paint' || isFaceSelected(element, key) || element.getTypeBehavior('select_faces') == false)"
-										:title="face_names[key]"
-										:class="{selected: isFaceSelected(element, key), unselected: display_uv === 'all_elements' && !mappable_elements.includes(element)}"
-										@mousedown.prevent="dragFace(element, key, $event)"
-										@touchstart.prevent="dragFace(element, key, $event)"
-										@contextmenu="selectFace(element, key, $event, true, false)"
-										:style="{
-											left: toPixels(Math.min(face.uv[0], face.uv[2]), -1),
-											top: toPixels(Math.min(face.uv[1], face.uv[3]), -1),
-											'--width': toPixels(Math.abs(face.uv_size[0]), 2),
-											'--height': toPixels(Math.abs(face.uv_size[1]), 2),
-										}"
-									>
-										<template v-if="isFaceSelected(element, key) && mode == 'uv' && !(display_uv === 'all_elements' && !mappable_elements.includes(element))">
-											{{ face_names[key] || '' }}
-											<div class="uv_resize_side horizontal" @mousedown="resizeFace(key, $event, 0, -1)" @touchstart.prevent="resizeFace(key, $event, 0, -1)" style="width: var(--width)"></div>
-											<div class="uv_resize_side horizontal" @mousedown="resizeFace(key, $event, 0, 1)" @touchstart.prevent="resizeFace(key, $event, 0, 1)" style="top: var(--height); width: var(--width)"></div>
-											<div class="uv_resize_side vertical" @mousedown="resizeFace(key, $event, -1, 0)" @touchstart.prevent="resizeFace(key, $event, -1, 0)" style="height: var(--height)"></div>
-											<div class="uv_resize_side vertical" @mousedown="resizeFace(key, $event, 1, 0)" @touchstart.prevent="resizeFace(key, $event, 1, 0)" style="left: var(--width); height: var(--height)"></div>
-											<div class="uv_resize_corner uv_c_nw" :class="{main_corner: !face.rotation}" @mousedown="resizeFace(key, $event, -1, -1)" @touchstart.prevent="resizeFace(key, $event, -1, -1)" style="left: 0; top: 0">
-												<div class="uv_rotate_field" v-if="cube_uv_rotation && face.rotation == 0" @mousedown.stop="rotateFace($event)" @touchstart.prevent.stop="rotateFace($event)"></div>
-											</div>
-											<div class="uv_resize_corner uv_c_ne" :class="{main_corner: face.rotation == 270}" @mousedown="resizeFace(key, $event, 1, -1)" @touchstart.prevent="resizeFace(key, $event, 1, -1)" style="left: var(--width); top: 0">
-												<div class="uv_rotate_field" v-if="cube_uv_rotation && face.rotation == 270" @mousedown.stop="rotateFace($event)" @touchstart.prevent.stop="rotateFace($event)"></div>
-											</div>
-											<div class="uv_resize_corner uv_c_sw" :class="{main_corner: face.rotation == 90}" @mousedown="resizeFace(key, $event, -1, 1)" @touchstart.prevent="resizeFace(key, $event, -1, 1)" style="left: 0; top: var(--height)">
-												<div class="uv_rotate_field" v-if="cube_uv_rotation && face.rotation == 90" @mousedown.stop="rotateFace($event)" @touchstart.prevent.stop="rotateFace($event)"></div>
-											</div>
-											<div class="uv_resize_corner uv_c_se" :class="{main_corner: face.rotation == 180}" @mousedown="resizeFace(key, $event, 1, 1)" @touchstart.prevent="resizeFace(key, $event, 1, 1)" style="left: var(--width); top: var(--height)">
-												<div class="uv_rotate_field" v-if="cube_uv_rotation && face.rotation == 180" @mousedown.stop="rotateFace($event)" @touchstart.prevent.stop="rotateFace($event)"></div>
-											</div>
-										</template>
-									</div>
-								</template>
-								
-								<div v-if="element.getTypeBehavior('cube_faces') && element.box_uv" class="cube_box_uv uv_face"
-									:key="element.uuid"
-									@mousedown.prevent="dragFace(element, null, $event)"
-									@touchstart.prevent="dragFace(element, null, $event)"
-									@click.prevent="selectCube(element, $event)"
-									:class="{unselected: display_uv === 'all_elements' && !mappable_elements.includes(element)}"
-									:style="{left: toPixels(element.uv_offset[0]), top: toPixels(element.uv_offset[1])}"
+							<!-- Behemiron GL: mesh 顶点手柄仍是 DOM(dragVertices 交互复杂度高,数量受"当前选中
+							     的 mesh face 数"限制),从 getMeshVertexHandleEntries() 拍平读取(已选中 + 上限保护)。 -->
+							<div class="uv_mesh_vertex_handles" v-for="entry in getMeshVertexHandleEntries()" :key="entry.element.uuid + ':' + entry.key + ':vertices'"
+								:style="{
+									left: toPixels(getMeshFaceCorner(entry.face, 0), -1),
+									top: toPixels(getMeshFaceCorner(entry.face, 1), -1),
+								}"
+							>
+								<div class="uv_mesh_vertex" v-for="(vkey, index) in entry.face.vertices" :key="vkey"
+									:class="{main_corner: index == 0, selected: entry.element.getSelectedVertices().includes(vkey)}"
+									@mousedown.prevent.stop="dragVertices(entry.element, vkey, $event)" @touchstart.prevent.stop="dragVertices(entry.element, vkey, $event)"
+									:style="{left: toPixels( entry.face.uv[vkey][0] - getMeshFaceCorner(entry.face, 0) ), top: toPixels( entry.face.uv[vkey][1] - getMeshFaceCorner(entry.face, 1) )}"
 								>
-									<div class="uv_fill" v-if="element.size(1, 'box_uv') > 0" :style="{left: '-1px', top: toPixels(element.size(2, 'box_uv'), -1), width: toPixels(element.size(2, 'box_uv')*2 + element.size(0, 'box_uv')*2, 2), height: toPixels(element.size(1, 'box_uv'), 2)}" />
-									<div class="uv_fill" v-if="element.size(0, 'box_uv') > 0" :style="{left: toPixels(element.size(2, 'box_uv'), -1), top: '-1px', width: toPixels(element.size(0, 'box_uv')*2, 2), height: toPixels(element.size(2, 'box_uv'), 2), borderBottom: element.size(1, 'box_uv') > 0 ? 'none' : undefined}" />
-									<div :style="{left: toPixels(element.size(2, 'box_uv'), -1), top: element.size(0, 'box_uv') > 0 ? '-1px' : toPixels(element.size(2, 'box_uv'), -1), width: toPixels(element.size(0, 'box_uv'), 2), height: toPixels( (element.size(0, 'box_uv') > 0 ? element.size(2, 'box_uv') : 0) + element.size(1, 'box_uv'), 2), borderRight: element.size(0, 'box_uv') == 0 ? 'none' : undefined}" />
-									<div v-if="element.size(1, 'box_uv') > 0 && element.size(0, 'box_uv') > 0" :style="{left: toPixels(element.size(2, 'box_uv')*2 + element.size(0, 'box_uv'), -1), top: toPixels(element.size(2, 'box_uv'), -1), width: toPixels(element.size(0, 'box_uv'), 2), height: toPixels(element.size(1, 'box_uv'), 2)}" />
 								</div>
+							</div>
 
-								<template v-if="element.type == 'mesh'">
-									<div class="mesh_uv_face uv_face"
-										v-for="(face, key) in filterMeshFaces(element)" :key="element.uuid + ':' + key"
-										v-if="face.vertices.length > 2 && (display_uv !== 'selected_faces' || mode == 'paint' || isFaceSelected(element, key)) && face.getTexture() == texture"
-										:class="{selected: isFaceSelected(element, key)}"
-										@mousedown.prevent="dragFace(element, key, $event)"
-										@touchstart.prevent="dragFace(element, key, $event)"
-										:style="{
-											left: toPixels(getMeshFaceCorner(face, 0), -1),
-											top: toPixels(getMeshFaceCorner(face, 1), -1),
-											width: toPixels(getMeshFaceWidth(face, 0), 2),
-											height: toPixels(getMeshFaceWidth(face, 1), 2),
-										}"
-									>
-										<svg>
-											<polygon :points="getMeshFaceOutline(face)" />
-										</svg>
-										<template v-if="mode == 'uv' && isFaceSelected(element, key)">
-											<div class="uv_mesh_vertex" v-for="(key, index) in face.vertices"
-												:class="{main_corner: index == 0, selected: element.getSelectedVertices().includes(key)}"
-												@mousedown.prevent.stop="dragVertices(element, key, $event)" @touchstart.prevent.stop="dragVertices(element, key, $event)"
-												:style="{left: toPixels( face.uv[key][0] - getMeshFaceCorner(face, 0) ), top: toPixels( face.uv[key][1] - getMeshFaceCorner(face, 1) )}"
-											>
-											</div>
-										</template>
-									</div>
-								</template>
-
-							</template>
-
-							<div class="uv_render_overflow_hint" v-if="getDisplayedUVElementOverflow() > 0">
-								<i class="material-icons" style="font-size: 16px; vertical-align: middle; margin-right: 4px;">speed</i>
-								{{ tl('uv_editor.too_many_selected', [getDisplayedUVElementOverflow()]) }}
+							<!-- Behemiron GL: cube_uv_face 本体已迁 canvas;resize/rotate 手柄仍是 DOM,
+							     从 getUVFaceHandleEntries() 拍平读取(已选中 + 上限保护),而非嵌套遍历全部展示元素。 -->
+							<div class="uv_face_handles" v-for="entry in getUVFaceHandleEntries()" :key="entry.element.uuid + ':' + entry.key + ':handles'"
+								:style="{
+									left: toPixels(Math.min(entry.face.uv[0], entry.face.uv[2]), -1),
+									top: toPixels(Math.min(entry.face.uv[1], entry.face.uv[3]), -1),
+									'--width': toPixels(Math.abs(entry.face.uv_size[0]), 2),
+									'--height': toPixels(Math.abs(entry.face.uv_size[1]), 2),
+								}"
+							>
+								{{ face_names[entry.key] || '' }}
+								<div class="uv_resize_side horizontal" @mousedown="resizeFace(entry.key, $event, 0, -1)" @touchstart.prevent="resizeFace(entry.key, $event, 0, -1)" style="width: var(--width)"></div>
+								<div class="uv_resize_side horizontal" @mousedown="resizeFace(entry.key, $event, 0, 1)" @touchstart.prevent="resizeFace(entry.key, $event, 0, 1)" style="top: var(--height); width: var(--width)"></div>
+								<div class="uv_resize_side vertical" @mousedown="resizeFace(entry.key, $event, -1, 0)" @touchstart.prevent="resizeFace(entry.key, $event, -1, 0)" style="height: var(--height)"></div>
+								<div class="uv_resize_side vertical" @mousedown="resizeFace(entry.key, $event, 1, 0)" @touchstart.prevent="resizeFace(entry.key, $event, 1, 0)" style="left: var(--width); height: var(--height)"></div>
+								<div class="uv_resize_corner uv_c_nw" :class="{main_corner: !entry.face.rotation}" @mousedown="resizeFace(entry.key, $event, -1, -1)" @touchstart.prevent="resizeFace(entry.key, $event, -1, -1)" style="left: 0; top: 0">
+									<div class="uv_rotate_field" v-if="cube_uv_rotation && entry.face.rotation == 0" @mousedown.stop="rotateFace($event)" @touchstart.prevent.stop="rotateFace($event)"></div>
+								</div>
+								<div class="uv_resize_corner uv_c_ne" :class="{main_corner: entry.face.rotation == 270}" @mousedown="resizeFace(entry.key, $event, 1, -1)" @touchstart.prevent="resizeFace(entry.key, $event, 1, -1)" style="left: var(--width); top: 0">
+									<div class="uv_rotate_field" v-if="cube_uv_rotation && entry.face.rotation == 270" @mousedown.stop="rotateFace($event)" @touchstart.prevent.stop="rotateFace($event)"></div>
+								</div>
+								<div class="uv_resize_corner uv_c_sw" :class="{main_corner: entry.face.rotation == 90}" @mousedown="resizeFace(entry.key, $event, -1, 1)" @touchstart.prevent="resizeFace(entry.key, $event, -1, 1)" style="left: 0; top: var(--height)">
+									<div class="uv_rotate_field" v-if="cube_uv_rotation && entry.face.rotation == 90" @mousedown.stop="rotateFace($event)" @touchstart.prevent.stop="rotateFace($event)"></div>
+								</div>
+								<div class="uv_resize_corner uv_c_se" :class="{main_corner: entry.face.rotation == 180}" @mousedown="resizeFace(entry.key, $event, 1, 1)" @touchstart.prevent="resizeFace(entry.key, $event, 1, 1)" style="left: var(--width); top: var(--height)">
+									<div class="uv_rotate_field" v-if="cube_uv_rotation && entry.face.rotation == 180" @mousedown.stop="rotateFace($event)" @touchstart.prevent.stop="rotateFace($event)"></div>
+								</div>
 							</div>
 
 							<div id="uv_selection_frame" v-if="mode == 'uv' && isScalingAvailable()" :style="getUVSelectionFrameStyle()">
@@ -5065,19 +5102,9 @@ Interface.definePanels(function() {
 								</div>
 							</div>
 
-							<div class="selection_rectangle"
-								v-if="selection_rect.active"
-								:style="{
-									left: toPixels(selection_rect.pos_x),
-									top: toPixels(selection_rect.pos_y),
-									width: toPixels(selection_rect.width),
-									height: toPixels(selection_rect.height),
-								}">
-							</div>
-							
-
-							<div v-if="helper_lines.x >= 0" class="uv_helper_line_x" :style="{left: toPixels(helper_lines.x)}"></div>
-							<div v-if="helper_lines.y >= 0" class="uv_helper_line_y" :style="{top: toPixels(helper_lines.y)}"></div>
+							<!-- Behemiron GL: 框选矩形(.selection_rectangle)+ 对齐辅助线(.uv_helper_line_x/y)
+							     已迁 OverlayLayer(canvas 渲染,纯视觉,自身无交互)。数据源 selection_rect /
+							     helper_lines 不变,仍由原有的框选拖拽 / 吸附对齐逻辑写入。 -->
 
 							<div id="uv_brush_outline" v-if="mode == 'paint' && mouse_coords.active" :class="brush_type" :style="getBrushOutlineStyle()">
 								<div v-if="mouse_coords.line_preview" id="uv_brush_line_preview" :style="getLinePreviewStyle()"></div>

@@ -2380,9 +2380,9 @@ span.controller_state_section_info {
 		--color-uv-background-hover: rgba(50, 70, 240, 0.3);
 		--uv-line-width: 2px;
 	}
-	#uv_frame .selection_rectangle {
-		z-index: 8;
-	}
+	/* Behemiron GL: 框选矩形已迁 OverlayLayer(canvas),不再有 #uv_frame > .selection_rectangle 这个
+	   DOM 节点。.selection_rectangle 本身(css/general.css)是跨模块共享的类名(3D 预览 / 时间轴
+	   也在用),不能删。 */
 	#uv_frame.overlay_mode {
 		--color-uv-unselected: var(--color-grid);
 		--color-uv-selected: var(--color-grid);
@@ -2733,55 +2733,34 @@ span.controller_state_section_info {
 		background-color: var(--color-dark);
 	}
 
-	.cube_box_uv {
+	/* Behemiron GL: cube_uv_face / box_uv 本体已由 UVGLScene(canvas) 渲染(Sprint 1/2)。
+	   resize/rotate 手柄(.uv_face_handles 及其子元素)保留 DOM(既定设计,不再计划迁 canvas——
+	   数量恒定跟着"当前选中面数"走,不会随全选爆炸,继续迁移风险大于收益),见 uv.js 的
+	   getUVFaceHandleEntries();box_uv 没有手柄,交互全部走 GL 命中层。 */
+
+	/* Behemiron GL: cube_uv_face 本体迁 canvas 后,手柄改用这个轻量定位容器覆盖在同一位置。
+	   容器本身 pointer-events:none 让 mousedown/contextmenu 穿透到 #uv_frame 的 GL 命中层,
+	   只有手柄自身(直接子元素 + .uv_rotate_field)接收指针事件。 */
+	.uv_face_handles {
 		position: absolute;
-		z-index: 2;
-	}
-	.cube_box_uv > div {
-		position: absolute;
-		z-index: 2;
-		cursor: move;
-		border: var(--uv-line-width) solid var(--color-accent);
-		box-sizing: border-box;
-	}
-	.cube_box_uv > div.uv_fill {
-		background-color: var(--color-uv-background);
-	}
-	.cube_box_uv:hover > div {
-		border-color: var(--color-uv-selected);
-		z-index: 3;
-	}
-	.cube_uv_face {
-		position: absolute;
-		z-index: 2;
+		z-index: 4;
 		width: var(--width);
 		height: var(--height);
-		cursor: move;
-		border: var(--uv-line-width) solid var(--color-text);
-		box-sizing: border-box;
-		background-color: var(--color-uv-background);
 		text-align: center;
 		color: var(--color-subtle_text);
 		font-size: 13px;
-	}
-	.cube_uv_face:hover {
-		border-color: var(--color-uv-hover);
-		background-color: var(--color-uv-background-hover);
-		z-index: 3;
-	}
-	.cube_uv_face.selected:not(.unselected) {
-		border-color: var(--color-uv-hover);
-		z-index: 4;
-		outline: 1px solid var(--color-border);
-	}
-	.cube_uv_face.unselected,
-	.cube_box_uv.unselected {
 		pointer-events: none;
-		z-index: 1;
 	}
-	.cube_uv_face.unselected > div,
-	.cube_box_uv.unselected > div {
-		border-color: var(--color-uv-unselected) !important;
+	.uv_face_handles > div {
+		pointer-events: auto;
+	}
+	.uv_face_handles .uv_rotate_field {
+		pointer-events: auto;
+	}
+	.uv_face_handles > .main_corner::after {
+		height: 11px;
+		width: 11px;
+		border-radius: 2px;
 	}
 
 	.uv_resize_side {
@@ -2804,7 +2783,7 @@ span.controller_state_section_info {
 		margin: -6px;
 		height: 9px;
 		width: 9px;
-		background-color:  white;
+		background-color: white;
 		border: 1px solid black;
 		z-index: 3;
 	}
@@ -2817,6 +2796,30 @@ span.controller_state_section_info {
 	.uv_resize_corner.uv_c_w {cursor: w-resize;}
 	.uv_resize_corner.uv_c_e {cursor: e-resize;}
 
+	.uv_rotate_field {
+		position: absolute;
+		width: 15px;
+		height: 15px;
+		bottom: 6px;
+		right: 6px;
+		cursor: url('../assets/rotate_cursor.png') 9 9, auto;
+	}
+
+	/* Behemiron GL: WebGL canvas 覆盖 #uv_frame,pointer-events:none 让 handle 的 DOM 事件
+	   仍能工作;#uv_frame 上有 delegator 做 cube_uv_face / box_uv / mesh_uv_face 的命中转发
+	   (Sprint 1/2)。z-index 低于 .uv_face_handles(4)/.uv_mesh_vertex(3),手柄始终盖在画面之上。 */
+	canvas.uv_gl_canvas {
+		position: absolute;
+		top: 0;
+		left: 0;
+		width: 100%;
+		height: 100%;
+		display: block;
+		pointer-events: none;
+		touch-action: none;
+		z-index: 1;
+	}
+
 	#uv_seleced_faces {
 		display: flex;
 	}
@@ -2824,31 +2827,13 @@ span.controller_state_section_info {
 		padding: 0 5px;
 	}
 
-	.mesh_uv_face {
+	/* Behemiron GL: mesh_uv_face 本体(三角化填色 + 描边多边形)已由 UVGLScene(canvas)渲染(Sprint 2)。
+	   顶点手柄(.uv_mesh_vertex_handles 及其子元素 .uv_mesh_vertex)仍是 DOM,见 uv.js 的
+	   getMeshVertexHandleEntries()。容器本身 pointer-events:none,.uv_mesh_vertex 已经用
+	   pointer-events:initial 显式恢复交互,不受影响。 */
+	.uv_mesh_vertex_handles {
 		position: absolute;
 		pointer-events: none;
-		z-index: 1;
-	}
-	.mesh_uv_face.selected {
-		z-index: 2;
-	}
-	.mesh_uv_face svg {
-		height: 100%;
-		width: 100%;
-		position: absolute;
-	}
-	.mesh_uv_face polygon {
-		pointer-events: initial;
-		fill: var(--color-uv-background);
-		stroke: var(--color-uv-unselected);
-		stroke-width: var(--uv-line-width);
-	}
-	.mesh_uv_face:hover polygon {
-		stroke: var(--color-uv-hover);
-		fill: var(--color-uv-background-hover);
-	}
-	.mesh_uv_face.selected polygon {
-		stroke: var(--color-uv-selected);
 	}
 	.uv_mesh_vertex {
 		position: absolute;
@@ -2865,24 +2850,7 @@ span.controller_state_section_info {
 	.uv_mesh_vertex.selected {
 		background-color:  var(--color-accent);
 	}
-	.uv_helper_line_x {
-		top: 0;
-		left: 0;
-		position: absolute;
-		background-color: var(--color-accent);
-		width: 1px;
-		height: 100%;
-		z-index: 1;
-	}
-	.uv_helper_line_y {
-		top: 0;
-		left: 0;
-		position: absolute;
-		background-color: var(--color-accent);
-		width: 100%;
-		height: 1px;
-		z-index: 1;
-	}
+	/* Behemiron GL: .uv_helper_line_x/y 已迁 OverlayLayer(canvas),不再需要这两条 DOM 规则。 */
 
 	.bar.uv_editor_sliders {
 		display: flex;
@@ -2917,21 +2885,8 @@ span.controller_state_section_info {
 		border: 1px solid white;
 		border-radius: 5px;
 	}
-	.cube_uv_face > .main_corner::after {
-		height: 11px;
-		width: 11px;
-		border-radius: 2px;
-	}
 	.main_corner.selected::after {
 		border-color: var(--color-accent);
-	}
-	.uv_rotate_field {
-		position: absolute;
-		width: 15px;
-		height: 15px;
-		bottom: 6px;
-		right: 6px;
-		cursor: url('../assets/rotate_cursor.png') 9 9, auto;
 	}
 
 	.joined_uv_bar {
@@ -3017,23 +2972,6 @@ span.controller_state_section_info {
 		margin: 8px auto auto;
 		color: var(--color-subtle_text);
 		max-width: fit-content;
-	}
-	/* Behemiron perf: UV editor 大量选择时的截断提示条 */
-	.uv_render_overflow_hint {
-		position: absolute;
-		left: 50%;
-		bottom: 8px;
-		transform: translateX(-50%);
-		padding: 4px 10px;
-		background: var(--color-back);
-		color: var(--color-subtle_text);
-		border: 1px solid var(--color-border);
-		border-radius: 4px;
-		font-size: 12px;
-		pointer-events: none;
-		white-space: nowrap;
-		z-index: 5;
-		box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
 	}
 	.copy_paste_tool_control {
 		height: 30px;

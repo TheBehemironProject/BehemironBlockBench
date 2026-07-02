@@ -34,11 +34,31 @@
 
   // ---- 配置 ----
   var FINISH_EDIT_DEBOUNCE_MS = 1000;
+  // 跨窗口实时同步广播的防抖间隔,独立于上面 SQLite 自动保存的 1000ms —— 同步
+  // 要"尽快"但不能每次按键都发,250ms 是 Spike B 阶段的初始值,Phase 0 落地后
+  // 建议针对真实项目(较多元素/材质)重新校准。
+  var SYNC_DEBOUNCE_MS = 250;
+  // 轻量选中态广播的防抖间隔——比整工程同步短得多,因为选中态同步不走
+  // replaceProjectContentInPlace 的"清空重灌",开销小很多,可以更频繁地发,
+  // 换取接近原生的选中响应速度。
+  var SELECTION_DEBOUNCE_MS = 60;
 
   // ---- 状态 ----
   var finishEditTimer = null;
+  var syncBroadcastTimer = null;
+  var selectionBroadcastTimer = null;
   var restoringProjects = false; // 避免恢复时回写
   var pendingHistory = null; // 收到 host:set-history 时若 Vue 未就绪暂存,稍后填入
+  // 本 BB 实例的唯一标识,每次 iframe/窗口启动重新生成。用于:
+  //   1. 标记自己广播出去的同步快照(接收端据此丢弃"回声")
+  //   2. 按来源窗口分别追踪已应用的 seq,丢弃乱序/重复的旧包
+  var windowInstanceId = (window.crypto && typeof window.crypto.randomUUID === 'function')
+    ? window.crypto.randomUUID()
+    : ('win-' + Date.now() + '-' + Math.random().toString(36).slice(2));
+  var syncSeq = 0;
+  var lastAppliedSyncSeqByOrigin = {};
+  var selectionSeq = 0;
+  var lastAppliedSelectionSeqByOrigin = {};
 
   // ---- 工具 ----
   // 默认 console.info,所有节点都打在 DevTools 默认可见级别;
@@ -169,6 +189,134 @@
     }
   }
 
+  // ---- 3a. 跨窗口实时同步:广播当前工程快照 ----
+  // 与 compileCurrentProject(用于 SQLite 持久化,raw 全量)刻意不同 ——
+  // 不带 bitmaps:true。Spike B 实测证实材质 dataURL 编码是单次调用里最重的
+  // 一块开销,高频的实时同步通道不应该背上它;材质变化如需同步,后续应该走
+  // 独立的低频通道,而不是让每次同步都重新编码全部材质。
+  function sendSyncBroadcast() {
+    try {
+      if (!window.Project || !window.Codecs || !window.Codecs.project) return;
+      var json = window.Codecs.project.compile({ editor_state: true, uuids: true, raw: true });
+      if (!json || typeof json !== 'object') return;
+      json.behemiron_uuid = window.Project.uuid;
+      syncSeq++;
+      sendToHost('bb:sync-broadcast-request', {
+        projectUuid: window.Project.uuid || '',
+        windowInstanceId: windowInstanceId,
+        seq: syncSeq,
+        snapshotJson: JSON.stringify(json),
+      });
+    } catch (e) {
+      log('sendSyncBroadcast failed', e);
+    }
+  }
+
+  // 防抖调度 sendSyncBroadcast——finish_edit 触发,250ms 内没有新的编辑才真正
+  // 发一次广播。选中态变化不再走这条(见下面 scheduleSelectionBroadcast),
+  // 避免"只是换个选中"也要付出整工程重建的代价。
+  function scheduleSyncBroadcast() {
+    if (syncBroadcastTimer) clearTimeout(syncBroadcastTimer);
+    syncBroadcastTimer = setTimeout(function () {
+      syncBroadcastTimer = null;
+      sendSyncBroadcast();
+    }, SYNC_DEBOUNCE_MS);
+  }
+
+  // ---- 3a-2. 轻量选中态广播(独立于整工程同步) ----
+  function sendSelectionBroadcast() {
+    try {
+      if (!window.Project) return;
+      selectionSeq++;
+      var elementUuids = (window.Project.selected_elements || []).map(function (e) { return e.uuid; });
+      var groupUuids = (window.Group && window.Group.multi_selected || []).map(function (g) { return g.uuid; });
+      sendToHost('bb:selection-broadcast-request', {
+        projectUuid: window.Project.uuid || '',
+        windowInstanceId: windowInstanceId,
+        seq: selectionSeq,
+        selectedElementUuids: elementUuids,
+        selectedGroupUuids: groupUuids,
+      });
+    } catch (e) {
+      log('sendSelectionBroadcast failed', e);
+    }
+  }
+
+  function scheduleSelectionBroadcast() {
+    if (selectionBroadcastTimer) clearTimeout(selectionBroadcastTimer);
+    selectionBroadcastTimer = setTimeout(function () {
+      selectionBroadcastTimer = null;
+      sendSelectionBroadcast();
+    }, SELECTION_DEBOUNCE_MS);
+  }
+
+  // 应用来自其它窗口的选中态——只调 applySelectionOnly(不碰 Outliner/Texture/
+  // Group/Animation 的增删),不会有 replaceProjectContentInPlace 那种整工程
+  // 重建的闪烁/迟钝感。用同样的 restoringProjects 抑制 + seq 防乱序套路。
+  function applySelectionSnapshot(payload) {
+    if (!payload) return;
+    if (payload.windowInstanceId === windowInstanceId) return;
+    var lastSeq = lastAppliedSelectionSeqByOrigin[payload.windowInstanceId] || 0;
+    if (typeof payload.seq === 'number' && payload.seq <= lastSeq) return;
+    if (!window.__behemironProjectSync || typeof window.__behemironProjectSync.applySelectionOnly !== 'function') return;
+    restoringProjects = true;
+    try {
+      var applied = window.__behemironProjectSync.applySelectionOnly(
+        payload.selectedElementUuids || [],
+        payload.selectedGroupUuids || []
+      );
+      if (applied && typeof payload.seq === 'number') {
+        lastAppliedSelectionSeqByOrigin[payload.windowInstanceId] = payload.seq;
+      }
+    } catch (e) {
+      log('applySelectionSnapshot failed', e);
+    } finally {
+      // 选中态应用不涉及 Three.js 节点重建,副作用基本是同步的,复位延迟可以
+      // 比整工程同步短很多。
+      setTimeout(function () { restoringProjects = false; }, 100);
+    }
+  }
+
+  // ---- 3b. 跨窗口实时同步:应用来自其它窗口的快照 ----
+  // 复用 restoringProjects 标志位抑制本地事件监听器在应用期间往外广播/持久化,
+  // 避免"应用远端快照 → 触发本地 finish_edit → 又广播出去"的回声环路。
+  function applySyncSnapshot(payload) {
+    if (!payload || !payload.snapshotJson) return;
+    if (payload.windowInstanceId === windowInstanceId) return; // 自己的广播,忽略回声
+    var lastSeq = lastAppliedSyncSeqByOrigin[payload.windowInstanceId] || 0;
+    if (typeof payload.seq === 'number' && payload.seq <= lastSeq) {
+      log('applySyncSnapshot: stale/out-of-order seq ignored', payload.seq, '<=', lastSeq);
+      return;
+    }
+    if (!window.__behemironProjectSync || typeof window.__behemironProjectSync.replaceProjectContentInPlace !== 'function') {
+      log('applySyncSnapshot: replaceProjectContentInPlace not available yet');
+      return;
+    }
+    var model;
+    try {
+      model = JSON.parse(payload.snapshotJson);
+    } catch (e) {
+      log('applySyncSnapshot: JSON parse failed', e);
+      return;
+    }
+    restoringProjects = true;
+    try {
+      var applied = window.__behemironProjectSync.replaceProjectContentInPlace(model);
+      if (applied && typeof payload.seq === 'number') {
+        lastAppliedSyncSeqByOrigin[payload.windowInstanceId] = payload.seq;
+      }
+      log('applySyncSnapshot: applied =', applied, 'from', payload.windowInstanceId, 'seq', payload.seq);
+    } catch (e) {
+      log('applySyncSnapshot: apply failed', e);
+    } finally {
+      // 和 restoreProjects() 用一样的 500ms 延迟复位(不再用更短的 200ms):
+      // replaceProjectContentInPlace 触发的 Vue/Three.js 副作用有部分是异步
+      // 落地的,过早复位可能让某个异步回调误判成"用户新编辑"而广播回声,
+      // 形成 A 广播→B 应用→B 误触发→广播回 A→A 应用→... 的环路。
+      setTimeout(function () { restoringProjects = false; }, 500);
+    }
+  }
+
   // 给刚加载的 Project 强制恢复稳定 uuid。
   // BB Codecs.project.load 不会从 model 拿 uuid,默认给新工程生成新 uuid。
   // 必须 load 完后立即手动 set,确保后续 save 命中同一个 DB 行(upsert)。
@@ -233,6 +381,168 @@
       rebindProjectUuid(model.behemiron_uuid || project.uuid);
     } catch (e) {
       log('openSingleProject failed', e);
+    }
+  }
+
+  // ---- 面板真弹出(Phase 1) ----
+  // 暴露为全局,让 panels.ts 的 expand_button 在 host 模式下调用,取代原本
+  // 同页面内 moveTo('float') 的"假弹出"。
+  window.behemironRequestPanelPopout = function (panelId, width, height) {
+    if (!panelId) return;
+    sendToHost('bb:request-panel-popout', {
+      kind: 'panel',
+      panelId: panelId,
+      projectUuid: (window.Project && window.Project.uuid) || '',
+      // 面板各自的浮动尺寸(position_data.float_size),不同面板类型给不同的
+      // 弹出窗口尺寸——之前统一硬编码 720x600,大纲树和调色板这种内容差异很大
+      // 的面板挤进同一个尺寸不合理。host 端会做兜底范围收敛,这里原样传。
+      width: typeof width === 'number' ? Math.round(width) : 0,
+      height: typeof height === 'number' ? Math.round(height) : 0,
+    });
+  };
+
+  // ---- 预览格真弹出(分屏每一格的"弹出为独立窗口",与面板复用同一条
+  // Go/React 通路——OpenPanelPopout 早就支持 kind='preview',这里补上 BB
+  // 源码侧的调用入口) ----
+  // slotIndex 对应 Preview.split_screen.previews 的下标,弹出窗口读取
+  // URL 的 slot 参数后走"预览 solo 模式"(见 applyPreviewSoloMode),只显示
+  // 一个全屏的 main_preview,不复刻分屏布局。
+  window.behemironRequestPreviewPopout = function (slotIndex, width, height) {
+    if (typeof slotIndex !== 'number') return;
+    sendToHost('bb:request-panel-popout', {
+      kind: 'preview',
+      panelId: String(slotIndex),
+      projectUuid: (window.Project && window.Project.uuid) || '',
+      width: typeof width === 'number' ? Math.round(width) : 0,
+      height: typeof height === 'number' ? Math.round(height) : 0,
+    });
+  };
+
+  // 接收 host 推来的"某面板在独立窗口里的开关状态"变化,转给 panels.ts
+  // 暴露的 __behemironPanelPopout 去切换占位层(showPopoutPlaceholder /
+  // hidePopoutPlaceholder,纯 DOM/CSS,不碰 Panel.moveTo())。
+  function applyPanelPopoutState(payload) {
+    if (!payload || !payload.panelId) return;
+    if (!window.__behemironPanelPopout || typeof window.__behemironPanelPopout.setPoppedOut !== 'function') return;
+    window.__behemironPanelPopout.setPoppedOut(payload.panelId, !!payload.popped);
+  }
+
+  // ---- 面板 solo 隔离(面板弹出窗口专用) ----
+  // URL 形如 /bb/?host=behemiron&panel=outliner —— 直接从自己的 URL 读,不必
+  // 等 host 消息往返。用纯 CSS 隐藏其它面板 + 顶部 chrome,刻意不调用
+  // Panel.moveTo(hidden)(会 flush 进跨窗口共享的 localStorage
+  // panel_customization,见 Wails v3 WebView2 存储分区共享的结论)。
+  var soloPanelId = (function () {
+    try {
+      return new URLSearchParams(window.location.search).get('panel') || '';
+    } catch (e) {
+      return '';
+    }
+  })();
+
+  function applyPanelSoloMode(panelId) {
+    if (!panelId) return;
+    try {
+      // 全局标记:preview.js 的 animate() 渲染循环 + uv.js 的 UVEditor GL 场景
+      // 都会查这个值,跳过看不见的渲染工作(纯 CSS display:none 只是隐藏 DOM,
+      // 不会让这些"面板级"的持续渲染循环停下来——canvas.isConnected 依然是
+      // true,实测不隐藏这些循环会导致弹出窗口整体卡顿,哪怕不编辑也一样)。
+      window.__BEHEMIRON_SOLO_PANEL_ID__ = panelId;
+      // 弹出窗口是全新独立启动的 BB 实例,跟主窗口没有运行时状态共享——如果
+      // 这个面板在本实例里构建出来时仍然是"附着"在别的面板上的标签页(没有
+      // 自己独立插入 DOM 的容器),CSS 选择器找不到东西可显示。在这一侧也
+      // 主动摘一次(panels.ts 暴露的 prepareSoloPanel,用 moveTo('hidden')
+      // 让 BB 自己的布局逻辑彻底不再管这个面板,不依赖主窗口那边是否已经
+      // 生效/落盘同步及时)。
+      if (window.__behemironPanelPopout && typeof window.__behemironPanelPopout.prepareSoloPanel === 'function') {
+        window.__behemironPanelPopout.prepareSoloPanel(panelId);
+        log('prepareSoloPanel done, project =', window.Project && window.Project.name);
+      } else {
+        log('prepareSoloPanel NOT AVAILABLE (window.__behemironPanelPopout missing?)');
+      }
+      // 之前几版都是靠 CSS 精确挑选"隐藏谁、显示谁"(.panel_container 属性
+      // 选择器 + z-index 覆盖),反复实测都不可靠——#page_wrapper 内部的层叠
+      // 上下文/Vue 动态重排比预期复杂,z-index 打不赢,弹出窗口里出现过显示
+      // 错误面板、甚至整个 #page_wrapper 的情况。
+      // 改用物理搬运:relocateSoloPanel 把目标面板的真实 DOM 容器整个搬到
+      // document.body 的直接子级,脱离 #page_wrapper 这整棵祖先树,这里只需
+      // 要把 #page_wrapper(装了 tab_bar/start_screen/work_screen 里所有面板
+      // /main_toolbar 的顶层容器)和 header(标题栏/菜单栏)整个隐藏——目标
+      // 面板已经不在这两者管辖范围内了,不需要再逐个排除。
+      if (window.__behemironPanelPopout && typeof window.__behemironPanelPopout.relocateSoloPanel === 'function') {
+        window.__behemironPanelPopout.relocateSoloPanel(panelId);
+      } else {
+        log('relocateSoloPanel NOT AVAILABLE (window.__behemironPanelPopout missing?)');
+      }
+      var style = document.createElement('style');
+      style.setAttribute('data-behemiron-solo', 'true');
+      style.textContent = 'header, #page_wrapper { display: none !important; }';
+      document.head.appendChild(style);
+      document.body.classList.add('behemiron-panel-solo');
+      log('panel solo mode applied for', panelId);
+      // 诊断:多个时间点抽查目标容器的实际尺寸/父节点/可见性,方便排查
+      // "一闪而过又消失"这类问题——不确定是否已经彻底修好,先把信号打出来。
+      [0, 300, 1000, 3000].forEach(function (delay) {
+        setTimeout(function () {
+          var el = document.querySelector('.panel_container[panel_id="' + panelId + '"]');
+          if (!el) {
+            log('diag @' + delay + 'ms: container not found in DOM at all for', panelId);
+            return;
+          }
+          var rect = el.getBoundingClientRect();
+          var cs = window.getComputedStyle(el);
+          log('diag @' + delay + 'ms:', panelId, {
+            parent: el.parentElement && (el.parentElement.id || el.parentElement.className),
+            width: rect.width,
+            height: rect.height,
+            display: cs.display,
+            visibility: cs.visibility,
+          });
+        }, delay);
+      });
+    } catch (e) {
+      log('applyPanelSoloMode failed', e);
+    }
+  }
+
+  // ---- 预览格 solo 隔离(预览弹出窗口专用) ----
+  // URL 形如 /bb/?host=behemiron&slot=1 —— 同样直接从自己的 URL 读。
+  // 与 applyPanelSoloMode 的关键区别:**不设置** window.__BEHEMIRON_SOLO_PANEL_ID__
+  // ——那个标记是让 preview.js 的 animate() 跳过渲染用的,预览弹出窗口的存在
+  // 意义就是要渲染 3D 视图,不能跟着一起被跳过。
+  //
+  // 弹出窗口是一份全新启动的 BB 实例,没有原窗口的分屏状态,这里不复刻
+  // 多格分屏布局,只让 main_preview 全屏显示——相当于把"这一格"单拎出来看,
+  // 相机角度从该窗口默认视角开始(不携带原格子的 camera_preset,是本次实现
+  // 的已知简化,如果需要还原成同一个视角,后续可以把 preset 编到 URL 里再读)。
+  var soloPreviewSlot = (function () {
+    try {
+      var v = new URLSearchParams(window.location.search).get('slot');
+      return v === null ? null : parseInt(v, 10);
+    } catch (e) {
+      return null;
+    }
+  })();
+
+  function applyPreviewSoloMode() {
+    try {
+      // 跟 applyPanelSoloMode 同一套思路(见那边注释详细说明失败史):不用
+      // CSS 精确挑选隐藏/显示,而是把 #center(装 #preview 主 3D 视口的结构
+      // 元素,不是 .panel_container,直接按 DOM id 取)物理搬到 body 直接
+      // 子级,脱离 #page_wrapper,然后把 #page_wrapper 和 header 整个隐藏。
+      var center = document.getElementById('center');
+      if (center) {
+        document.body.appendChild(center);
+        center.style.cssText = 'position: fixed; inset: 0; width: 100vw; height: 100vh;';
+      }
+      var style = document.createElement('style');
+      style.setAttribute('data-behemiron-solo', 'true');
+      style.textContent = 'header, #page_wrapper { display: none !important; }';
+      document.head.appendChild(style);
+      document.body.classList.add('behemiron-preview-solo');
+      log('preview solo mode applied');
+    } catch (e) {
+      log('applyPreviewSoloMode failed', e);
     }
   }
 
@@ -355,9 +665,28 @@
         var dto = compileCurrentProject();
         if (dto) sendToHost('bb:project-saved', { project: dto });
       }, FINISH_EDIT_DEBOUNCE_MS);
+
+      // 跨窗口实时同步:独立于上面的 SQLite 自动保存 debounce,间隔更短。
+      scheduleSyncBroadcast();
+    });
+
+    // 单纯的选中态变化(点大纲树节点/3D 视口点选)不会触发 finish_edit——
+    // finish_edit 只在 Undo.finishEdit() 时派发,选择不算"编辑"、不进撤销
+    // 历史。之前只挂 finish_edit 导致"弹出的 Outliner 里点选没反应":选中
+    // 变化压根没广播出去。update_selection 是 misc.js 的 updateSelection()
+    // 末尾统一派发的全局事件,覆盖所有选中来源(大纲树/3D视口/UV编辑器等)。
+    bb.addListener('update_selection', function () {
+      if (restoringProjects) return;
+      scheduleSelectionBroadcast();
     });
 
     bb.addListener('select_project', function (data) {
+      // 补上其它监听器都有的 restoringProjects 守卫:applySyncSnapshot() 在
+      // 多工程场景下可能调用 target.select()(目标不是当前激活工程时),这个
+      // select() 会派发 select_project——若不守卫,会绕过"应用同步期间不落库"
+      // 的约束,无条件触发一次真实 SQLite 写入,违反"同一工程同一时刻只有一个
+      // 窗口写库"的设计。
+      if (restoringProjects) return;
       var proj = data && data.project ? data.project : window.Project;
       var uuid = proj && proj.uuid ? proj.uuid : '';
       sendToHost('bb:project-switched', { uuid: uuid });
@@ -410,6 +739,17 @@
           break;
         case 'host:project-open':
           openSingleProject(data.payload && data.payload.project);
+          // 面板/预览弹出窗口专属:工程真正加载完成后才应用 solo 模式——
+          // 提前到 bb:ready 时应用会因为工程还没加载、面板内容压根没渲染出
+          // 东西而导致弹出窗口一片空白(实测踩过)。整编辑器弹出/主窗口没有
+          // soloPanelId/soloPreviewSlot,这两个分支不会命中,不影响它们。
+          if (soloPanelId) {
+            applyPanelSoloMode(soloPanelId);
+            sendToHost('bb:panel-solo-ready', {});
+          } else if (soloPreviewSlot !== null) {
+            applyPreviewSoloMode();
+            sendToHost('bb:panel-solo-ready', {});
+          }
           break;
         case 'host:flush-current': {
           var dto = compileCurrentProject();
@@ -421,6 +761,15 @@
         }
         case 'host:set-history':
           applyHistory(data.payload && data.payload.history);
+          break;
+        case 'host:sync-apply':
+          applySyncSnapshot(data.payload);
+          break;
+        case 'host:selection-apply':
+          applySelectionSnapshot(data.payload);
+          break;
+        case 'host:panel-popout-state':
+          applyPanelPopoutState(data.payload);
           break;
         case 'host:save-ack': {
           var ok = data.payload && data.payload.ok;
@@ -448,6 +797,12 @@
         clearInterval(t);
         attachBlockbenchListeners();
         setupCtrlSInterceptor();
+        // 注意:不在这里应用 solo 模式。这时候工程还没加载(usePanelPopout.ts
+        // 要等 bb:ready 之后才会拉工程数据、发 host:project-open),面板的
+        // 内容普遍依赖"当前工程/模式"才会渲染出东西(比如颜色/调色板面板挂着
+        // condition:{modes:['paint']})——这时候把一个内容还没渲染出来的空
+        // 容器搬去 body,弹出窗口只会是一片空白(实测踩过这个坑)。solo 模式
+        // 挪到下面 host:project-open 处理完之后再应用。
         sendToHost('bb:ready', {
           version: (window.Blockbench && window.Blockbench.version) || '',
         });

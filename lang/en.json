@@ -2475,6 +2475,7 @@
 	"menu.panel.move_to.top": "Top",
 	"menu.panel.move_to.bottom": "Bottom",
 	"menu.panel.move_to.float": "Float",
+	"menu.panel.move_to.popout": "Pop out window",
 	"menu.panel.move_to.hidden": "Hide",
 	"menu.panel.fold": "Collapse",
 
@@ -2657,6 +2658,7 @@
 	"codec.image.animation_fps": "Animation FPS",
 
 	"preview.center_camera": "Center Camera",
+	"preview.popout": "Pop out window",
 
 	"panel.uv": "UV",
 	"panel.display": "Display",

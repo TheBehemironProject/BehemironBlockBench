@@ -1004,6 +1004,7 @@ Interface.definePanels(function() {
 
 	new Panel('variable_placeholders', {
 		icon: 'fas.fa-stream',
+		expand_button: true,
 		condition: {modes: ['animate']},
 		growable: true,
 		resizable: true,

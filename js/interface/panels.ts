@@ -5,6 +5,11 @@ import { Interface, openTouchKeyboardModifierMenu, resizeWindow, updateInterface
 import {Toolbar} from './toolbars'
 import { Vue } from "../lib/libs";
 import { Blockbench } from "../api";
+// [Behemiron] modes.ts 反过来 import 本文件(Panels/updateInterfacePanels 等),
+// 这里形成循环引用——ESM 循环引用在"只在函数体里延迟使用,不在模块顶层求值
+// 时使用"的前提下是安全的,prepareSoloPanel 只在弹出窗口收到 host:project-open
+// 之后才会被调用,届时两个模块都已完整求值完毕。
+import { Mode, Modes } from "../modes";
 
 interface PanelPositionData {
 	slot: PanelSlot
@@ -78,6 +83,47 @@ const DEFAULT_POSITION_DATA: PanelPositionData = {
 	attached_index: undefined,
 	open_tab: undefined,
 	sidebar_index: 0,
+}
+
+// [Behemiron] 请求把面板真弹出到独立 OS 窗口(behemiron-host.js 暴露的桥接
+// 函数,只在 Foundation host 环境存在)。expand_button 和"移到 > 弹出窗口"
+// 菜单项共用这一个helper,避免两处各写一份逻辑。
+// 尺寸取面板当前的 position_data.float_size——每个面板的默认浮动尺寸本来就
+// 不一样(见各面板 default_position 定义),弹出窗口沿用这个尺寸比统一写死
+// 更合理,不然大纲树这种面板和调色板这种面板会被塞进同一个尺寸的窗口里。
+//
+// 关键:附着(attached_to)在别的面板上的标签页(比如"调色板"附着在"颜色"
+// 上,共用同一个 DOM 容器切标签显示)没有自己独立的 .panel_container 可弹——
+// 直接用 panel.id 弹会弹出一个内容对不上号的空容器(实测复现:弹调色板却显示
+// 了别的面板)。一开始改成弹整个标签组的宿主容器,但用户明确要求"颜色"/
+// "调色板"应该能像 BB 原生支持的那样各自独立弹出,而不是被强行绑在一起。
+// moveTo() 本来就是 BB 原生"把标签拖出来单独摆"用的方法——它会清空
+// attached_to 并把 this.node 重新挂回 this.container,天然产生一个内容正确
+// 的独立容器。这里对"点了谁就弹谁,弹出的这个必须孤立"做两件事:
+//   1) 如果自己是附着方(attached_to 非空),先把自己摘出来;
+//   2) 如果自己是宿主、还有别的面板附着自己,把那些面板也摘出去,
+//      不然宿主弹出去时会捎带上仍然指向它的附着面板。
+// [Behemiron] 记录"为了弹出而被摘出附着关系"的面板 -> 原宿主 id。
+// moveTo() 一旦调用就会把 position_data.attached_to 清空且不保留痕迹,
+// "带回"时如果不自己记一份,面板从此就会永久变成散落的浮动面板,再也
+// 回不去原来的标签组——这是弹出流程新引入的状态,理应由弹出流程自己
+// 负责在关闭时复原,而不是留给用户手动重新拖拽标签。
+const panelPopoutDetachHistory: Record<string, string> = {};
+
+function requestRealPopout(panel: Panel): boolean {
+	let requestPopout = (window as any).behemironRequestPanelPopout;
+	if (typeof requestPopout !== 'function') return false;
+	if (panel.attached_to) {
+		panelPopoutDetachHistory[panel.id] = panel.attached_to;
+		panel.moveTo('float');
+	}
+	for (let attached of panel.getAttachedPanels()) {
+		panelPopoutDetachHistory[attached.id] = panel.id;
+		attached.moveTo('float');
+	}
+	let size = panel.position_data.float_size;
+	requestPopout(panel.id, size[0], size[1]);
+	return true;
 }
 
 export class Panel extends EventSystem {
@@ -225,6 +271,11 @@ export class Panel extends EventSystem {
 				let expand_button = Interface.createElement('div', {class: 'tool panel_control panel_expanding_button'}, Blockbench.getIconNode('fullscreen'))
 				this.tab_bar.append(expand_button);
 				expand_button.addEventListener('click', (e) => {
+					// [Behemiron] host 模式下真弹出到独立 OS 窗口,取代原本"同页面
+					// 内浮动"的 moveTo('float')。requestRealPopout 内部检测
+					// behemiron-host.js 暴露的桥接函数是否存在(未嵌入 Foundation/
+					// 独立使用 blockbench.net 时不存在,自动回退到原生行为)。
+					if (requestRealPopout(this)) return;
 					if (this.slot == 'float') {
 						this.moveTo(this.previous_slot);
 					} else {
@@ -670,6 +721,20 @@ export class Panel extends EventSystem {
 		}
 		this.toolbars.splice(position, 0, toolbar);
 	}
+	// [Behemiron] 面板真弹出到独立窗口期间,主窗口这边直接把面板整个折叠掉
+	// (不占位置,让其它面板自然填充空间),不显示任何"已弹出"提示文字——
+	// 用户从弹出窗口自己的关闭按钮/带回按钮收回,主窗口这边只负责腾地方。
+	// 纯 CSS 覆盖(this.container.style.display),不调用 moveTo()(会写入
+	// 跨窗口共享的 localStorage panel_customization,见 Wails v3 WebView2
+	// 存储分区共享的结论)。
+	showPopoutPlaceholder(): void {
+		this.container.style.display = 'none';
+	}
+
+	hidePopoutPlaceholder(): void {
+		this.container.style.display = '';
+	}
+
 	fold(state = !this.folded): this {
 		this.folded = !!state;
 		let new_icon = Blockbench.getIconNode(state ? 'expand_less' : 'expand_more');
@@ -1136,6 +1201,17 @@ Panel.prototype.snap_menu = new Menu([
 					panel.moveTo('float');
 				}
 			},
+			{
+				// [Behemiron] 独立于上面的"浮动"——真弹出到 OS 窗口,只在 host
+				// 环境显示(未嵌入 Foundation 时 requestRealPopout 检测不到桥接
+				// 函数,这一项应该隐藏而不是显示了却点了没反应)。
+				name: 'menu.panel.move_to.popout',
+				icon: 'open_in_new',
+				condition: () => typeof (window as any).behemironRequestPanelPopout === 'function',
+				click: (panel) => {
+					requestRealPopout(panel);
+				}
+			},
 			'_',
 			{
 				name: 'menu.panel.move_to.hidden',
@@ -1212,6 +1288,157 @@ Interface.Panels = Panels;
 Interface.panel_definers = []
 Interface.definePanels = function(callback) {
 	Interface.panel_definers.push(callback);
+};
+
+// [Behemiron] 暴露给 behemiron-host.js 调用(它是纯 JS、不走 ES import,只能
+// 通过 window 访问)。host.js 收到 host:panel-popout-state 消息(某个面板在
+// 独立窗口里被打开/关闭了)时,调这个方法切换对应面板的占位层。
+(window as any).__behemironPanelPopout = {
+	setPoppedOut(panelId: string, popped: boolean) {
+		let panel = Panels[panelId];
+		if (!panel) return;
+		if (popped) {
+			panel.showPopoutPlaceholder();
+		} else {
+			panel.hidePopoutPlaceholder();
+			// 恢复这个面板自己(如果它弹出前是被摘出来的附着面板,比如"调色板")
+			let originalHostId = panelPopoutDetachHistory[panelId];
+			if (originalHostId) {
+				delete panelPopoutDetachHistory[panelId];
+				let host = Panels[originalHostId];
+				if (host) host.attachPanel(panel);
+			}
+			// 恢复因为这个面板(作为宿主)弹出而被连带摘出去的附着子面板
+			// (比如弹出"颜色"时,附着在它上面的"调色板"被摘成了浮动面板)
+			for (let childId in panelPopoutDetachHistory) {
+				if (panelPopoutDetachHistory[childId] === panelId) {
+					delete panelPopoutDetachHistory[childId];
+					let child = Panels[childId];
+					if (child) panel.attachPanel(child);
+				}
+			}
+		}
+	},
+	// [Behemiron] 面板弹出窗口是一份全新独立启动的 BB 实例,跟主窗口没有任何
+	// 运行时状态共享(只共享 SQLite 工程数据 + localStorage 里的 UI 偏好)。
+	// 主窗口那边点弹出时对自己的 Panel 对象调 moveTo('float') 摘出来,
+	// 对弹出窗口这边重新构建出来的、独立的同名 Panel 对象完全没有影响——
+	// 如果它启动时读到的 StoredPanelData 仍然是"附着"状态(或者压根没来得及
+	// 落盘同步),同一个"内容对不上号的空容器"问题会在这边原样复现。
+	// 所以 behemiron-host.js 的 applyPanelSoloMode 必须在这一侧也做一次同样
+	// 的摘出操作,不能依赖主窗口那边有没有生效。
+	prepareSoloPanel(panelId: string) {
+		let panel = Panels[panelId];
+		if (!panel) return;
+		// 很多面板的 condition 挂着 {modes: [...]}(比如颜色/调色板要求
+		// modes:['paint'],动画列表要求 modes:['animate'])——工程默认按
+		// 'edit' 模式打开,条件不满足时面板内容压根不会渲染出东西(BB 自己
+		// 的可见性判断,跟弹出/物理搬运无关),物理搬运一个没有内容的容器
+		// 过去,弹出窗口只会是空白(这是继"工程还没加载"之后又踩的一个坑)。
+		// 这里读 panel.condition.modes,自动切到能让这个面板"有内容"的模式。
+		let condition = panel.condition as any;
+		if (condition && typeof condition === 'object' && Array.isArray(condition.modes) && condition.modes.length) {
+			let targetMode = condition.modes[0];
+			let modeOption = (Modes.options as any)[targetMode];
+			if (modeOption && Mode.selected !== modeOption && typeof modeOption.select === 'function') {
+				modeOption.select();
+			}
+		}
+		// [Behemiron] 用 'hidden' 而不是 'float',而且是**无条件**对目标面板自己
+		// 调用——最初只在 panel.attached_to 非空时才摘,遗漏了"面板本来就没
+		// 附着、老老实实待在 left_bar/right_bar 默认位置"这一大类(比如大纲树)。
+		// updateSidebarOrder() 的判断是 `if (!panel.attached_to && Condition(
+		// panel.condition)) { ...重新 append 回 bar_node... }`——只要没有摘成
+		// 'hidden',不管原来是不是附着面板,任何触发它重新跑一遍(切模式/点击
+		// 触发的焦点更新/resize 等)都会把面板"纠正"回原来的 left_bar/right_bar
+		// 或者 float 位置——而这些位置这时候已经被 #page_wrapper 整个隐藏了,
+		// 表现为"一闪而过又消失"。'hidden' 在 BB 自己的语义里是"不参与布局
+		// 管理"(不少地方用 `panel.slot != 'hidden'` 做布局/可见性判断的短路
+		// 条件),之后 relocateSoloPanel 手动搬到 body 就不会被这套逻辑找回去。
+		panel.moveTo('hidden');
+		for (let attached of panel.getAttachedPanels()) {
+			attached.moveTo('hidden');
+		}
+	},
+	// [Behemiron] 之前几版都是用 CSS(`.panel_container:not([panel_id=...])`
+	// + z-index 覆盖)试图"只显示这一个、隐藏其它所有",反复实测都不可靠——
+	// #page_wrapper 内部的层叠上下文/Vue 动态重排比预期复杂,z-index 打不赢,
+	// 弹出窗口里出现过显示错误面板、甚至整个 #page_wrapper 的情况。
+	// 改用更直接的办法:把目标面板真实的 DOM 节点(container,含 tab_bar +
+	// node,内容完整)物理搬到 document.body 的直接子级,脱离 #page_wrapper
+	// 这整棵复杂的祖先树,然后 host.js 那边直接把 #page_wrapper 整个隐藏——
+	// 不再需要精确挑选"隐藏谁、显示谁",因为目标面板已经不在那棵树里了。
+	//
+	// 额外加了 MutationObserver 兜底:万一 BB 内部某处仍然把这个 container
+	// 从 body 移走(目前已知诱因是 moveTo('float') 的浮动布局纠正逻辑,改
+	// 'hidden' 后应该不会再触发,但这里留一道保险,而不是假设"这次一定够了")。
+	relocateSoloPanel(panelId: string) {
+		let panel = Panels[panelId];
+		if (!panel) return;
+		let container = panel.container;
+		// [Behemiron] 用注入的 !important 样式表规则,而不是只靠 inline
+		// style.cssText——实测复现过"弹出窗口组件不占满窗口":Panel.update()
+		// (每次 resize/切模式等布局 tick 都会跑一遍)在 slot 不是 'float' 时
+		// 会无条件执行
+		//   this.container.style.width = this.container.style.left = this.container.style.top = null;
+		// 这会把下面 pin() 原本想靠 inline cssText 设的 width/left/top 原样
+		// 清空。`inset: 0` 这个 shorthand 会展开成 top/right/bottom/left 四个
+		// 独立的 longhand,被清空 left/top 后只剩 right:0/bottom:0 还生效,
+		// 容器退化成"贴右下角、宽高由内容撑开"的小块——这正是症状。样式表里的
+		// !important 规则不受 inline style 后续被清空成什么样影响,始终生效,
+		// 一次性从根上解决,不用跟 Panel.update() 这次清空赛跑。
+		let styleTag = document.getElementById('behemiron-solo-fullscreen-style') as HTMLStyleElement | null;
+		if (!styleTag) {
+			styleTag = document.createElement('style');
+			styleTag.id = 'behemiron-solo-fullscreen-style';
+			styleTag.textContent =
+				'.behemiron-solo-fullscreen { position: fixed !important; inset: 0 !important; ' +
+				'width: 100vw !important; height: 100vh !important; z-index: 2147483647 !important; ' +
+				'display: flex !important; }';
+			document.head.appendChild(styleTag);
+		}
+		container.classList.add('behemiron-solo-fullscreen');
+		function pin() {
+			if (container.parentElement !== document.body) {
+				document.body.appendChild(container);
+			}
+		}
+		pin();
+		// 只需要盯 document.body 的直接子级变化——container 一旦被挪走,
+		// body 这边就会收到一条 removedNodes 记录,不需要额外再观察它挪去的
+		// 那个新父节点(pin() 会立刻把它挪回来,追下去意义不大)。
+		let observer = new MutationObserver(() => {
+			if (container.parentElement !== document.body) {
+				console.info('[behemiron] solo panel got moved away from body, re-pinning', panelId);
+				pin();
+			}
+		});
+		observer.observe(document.body, {childList: true});
+
+		// [Behemiron] 同步 panel.width/panel.height(Panel 实例属性,不是 CSS)。
+		// 实测复现过"UV 编辑器弹出窗口底部大量空白":UV 编辑器的画布尺寸不是
+		// 读容器实际渲染尺寸算的,是直接读 UVEditor.panel.width/height 这两个
+		// 数字属性(js/uv/uv.js updateSize() 里 `UVEditor.panel.height - ...`)。
+		// 这两个属性只在 Panel.update() 的 slot 分支里被赋值(float 读
+		// float_size、sidebar 读 left/right_bar_width、top/bottom 读
+		// center_screen 高度),'hidden' 这个分支完全没有对应逻辑——面板被摘成
+		// 'hidden' 之后这两个属性就凝固在"摘出前待在原来那个 slot 时"的旧值
+		// (通常是侧栏宽度/高度,远小于弹出窗口整个视口),但 relocateSoloPanel
+		// 已经把容器物理撑满了整个窗口,两者一旦对不上,任何按这两个属性算
+		// 尺寸的子组件(不只是 UV 编辑器,以后别的面板遇到同样模式也一样会中)
+		// 就会画出一块和容器实际大小对不上号的内容,多出来的空间表现为空白。
+		// 这里在物理撑满之后直接把这两个属性纠正成容器的真实渲染尺寸,再手动
+		// 调一次 panel.onResize()(UV 编辑器等面板注册在这上面的尺寸重算钩子)
+		// 让已经渲染出来的内容立即用正确尺寸重算一次。另外监听 window resize——
+		// 弹出窗口本身被用户拖动改变大小时,同一套逻辑要重新跑一遍。
+		function syncPanelDimensions() {
+			panel.width = container.clientWidth;
+			panel.height = container.clientHeight;
+			if (panel.onResize) panel.onResize();
+		}
+		syncPanelDimensions();
+		window.addEventListener('resize', syncPanelDimensions);
+	},
 };
 
 const StoredPanelData: Record<string, Record<string, PanelPositionData>> = {};
@@ -1301,7 +1528,17 @@ export function updateInterfacePanels() {
 		resizer.update()
 	}
 	updateSidebarOrder();
-	localStorage.setItem('panel_customization', JSON.stringify(StoredPanelData));
+	// [Behemiron] 面板弹出窗口里 prepareSoloPanel() 会对目标面板调用
+	// moveTo('hidden'),这会把 position_data.slot 改成 'hidden' 并通过这里
+	// 落盘——但 localStorage 的 panel_customization 是跨窗口共享的(见 Spike A
+	// 结论),不加这道口子的话,这个"仅在弹出窗口里才成立"的临时摘除状态会
+	// 污染共享存储:主窗口下次启动、或任何其它面板弹出窗口下次启动,读到的
+	// 就是这个面板被错误持久化的 'hidden' 状态,导致它在主窗口里也消失。
+	// 弹出窗口本来就是"强制只显示一个面板"的特殊场景,它自己的面板布局
+	// 没有任何值得持久化的意义,直接跳过这次落盘即可,不需要更精细的处理。
+	if (!(window as any).__BEHEMIRON_SOLO_PANEL_ID__) {
+		localStorage.setItem('panel_customization', JSON.stringify(StoredPanelData));
+	}
 }
 
 export function updateSidebarOrder() {

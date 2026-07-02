@@ -1670,7 +1670,56 @@ export class Preview {
 			preview.setProjectionMode(!preview.isOrtho, true);
 		}},
 		new MenuSeparator('interface'),
-		'split_screen',
+		// [Behemiron] 原来直接引用 BarItems.split_screen 这个共享 BarSelect(bare
+		// string,由 menu.js 按 `s instanceof BarSelect` 分支自动展开成
+		// single/双屏横/双屏竖/四宫格等互斥选项)。"弹出为独立窗口"不是一个互斥
+		// 状态,是一个动作,不能塞进 BarSelect.options 里(那会被当成新的
+		// split_screen 取值,点击时错误地把 Preview.split_screen.setMode()
+		// 调成一个不存在的模式)。这里改成自己构建 children:先原样复刻
+		// BarSelect 的选项列表(保持右键菜单显示不变),再在末尾追加一条
+		// "弹出为独立窗口"——只在分屏已经启用、且这一格能在 Preview.split_screen
+		// .previews 里找到自己的下标时才显示(用户之前明确要求:不要做成格子
+		// 右上角悬浮的单独按钮,要塞进这个分屏下拉框里)。
+		{
+			id: 'split_screen',
+			icon: () => BarItems.split_screen.icon,
+			name: () => BarItems.split_screen.name,
+			condition: () => Condition(BarItems.split_screen.condition),
+			children: function(preview) {
+				let bar_item = BarItems.split_screen;
+				let children = [];
+				for (let key in bar_item.options) {
+					let val = bar_item.options[key];
+					if (!val) continue;
+					children.push({
+						name: bar_item.getNameFor(key),
+						id: key,
+						icon: val.icon || (bar_item.value == key ? 'far.fa-dot-circle' : 'far.fa-circle'),
+						condition: val.condition,
+						click: () => {
+							bar_item.set(key);
+							if (bar_item.onChange) bar_item.onChange(bar_item);
+						}
+					});
+				}
+				let requestPreviewPopout = window.behemironRequestPreviewPopout;
+				if (Preview.split_screen.enabled && typeof requestPreviewPopout === 'function') {
+					let index = Preview.split_screen.previews.indexOf(preview);
+					if (index !== -1) {
+						children.push('_');
+						children.push({
+							icon: 'open_in_new',
+							name: 'preview.popout',
+							click: () => {
+								let wrapper = document.querySelector(`.split_screen_wrapper_${index}`);
+								requestPreviewPopout(index, (wrapper && wrapper.clientWidth) || 800, (wrapper && wrapper.clientHeight) || 600);
+							}
+						});
+					}
+				}
+				return children;
+			}
+		},
 		{icon: 'fullscreen', name: 'menu.preview.maximize', condition: function(preview) {return Preview.split_screen.enabled && !ReferenceImageMode.active && !Modes.display}, click: function(preview) {
 			preview.fullscreen();
 		}}
@@ -2236,6 +2285,13 @@ export function animate() {
 		WinterskyScene.updateFacingRotation(Preview.selected.camera);
 	}
 	Preview.all.forEach(function(prev) {
+		// [Behemiron] 面板弹出到独立窗口后走 CSS display:none 隐藏其它区域
+		// (含主 3D 预览),但 display:none 不会让 canvas.isConnected 变 false——
+		// 不加这层判断,被隐藏的预览会在看不见的情况下持续满帧渲染,拖累整个
+		// 窗口(实测:不编辑、只是拖动窗口大小也卡,根源就是这里)。
+		// window.__BEHEMIRON_SOLO_PANEL_ID__ 只在面板弹出窗口(非预览类)里
+		// 才会被设置,正常主窗口/整编辑器弹出窗口不受影响。
+		if (window.__BEHEMIRON_SOLO_PANEL_ID__) return;
 		if (prev.canvas.isConnected) {
 			prev.render()
 		}

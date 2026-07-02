@@ -1682,6 +1682,7 @@ Interface.definePanels(function() {
 
 	new Panel('animations', {
 		icon: 'movie',
+		expand_button: true,
 		growable: true,
 		resizable: true,
 		condition: {modes: ['animate']},

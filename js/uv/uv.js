@@ -4185,13 +4185,24 @@ Interface.definePanels(function() {
 					}
 					return entries;
 				},
-				// Behemiron GL: lazy 初始化 UVGLScene(refs 出现即绑定,texture=null 时 #uv_frame 不渲染,等下次 update)
+				// Behemiron GL: lazy 初始化 UVGLScene(refs 出现即绑定,texture=null 时 #uv_frame 不渲染,等下次 update)。
+				// 关键: #uv_frame 是 v-if="texture !== null" 控制的,texture 短暂变 null 再变回来
+				// (比如切换选中元素的过渡态)会让 Vue 把 #uv_frame 连同里面的 <canvas> 整个销毁重建成
+				// 新 DOM 节点 —— 如果这里只判断 `this._gl` 存不存在,就永远不会发现 canvas 换了,
+				// this._gl 的 WebGLRenderer 还绑在旧的、已经从 DOM 摘掉的 canvas 上,新画布上什么都
+				// 画不出来,而且不报错(对 detached canvas 调 render() 不会抛异常)。
+				// 所以必须记住"上次绑定的是哪个 canvas 元素",发现变了就先 dispose 再重建。
 				_ensureGL() {
-					if (this._gl) return;
 					const frame = this.$refs.frame;
 					const canvas = this.$refs.gl_canvas;
 					if (!frame || !canvas) return;
+					if (this._gl && this._glCanvas === canvas) return;
+					if (this._gl) {
+						this._gl.dispose();
+						this._gl = null;
+					}
 					this._gl = createUVGLScene({ container: frame, canvas, vue: this });
+					this._glCanvas = canvas;
 				},
 				scheduleGLRedraw() {
 					if (this._gl) this._gl.scheduleRedraw();
@@ -4891,6 +4902,14 @@ Interface.definePanels(function() {
 				// 注意: 这个方法必须放在 methods 里(跟 mounted/updated 平级会导致 Vue 不认得
 				// 这个 key,this._isGLVisible 变成 undefined,调用时直接抛 TypeError)。
 				_isGLVisible() {
+					// [Behemiron] 面板弹出窗口用 CSS display:none 隐藏非目标面板,
+					// 不会同步更新 this.hidden(那是走 Panel.onFold/onResize 钩子的
+					// BB 原生可见性信号),单独查一下 solo 模式标记——否则 UV 编辑器
+					// 的独立 WebGL 场景会在看不见的情况下继续跑渲染循环,原理与上面
+					// 这段注释描述的泄漏一致,只是触发路径从"面板折叠"变成"面板弹出"。
+					if (window.__BEHEMIRON_SOLO_PANEL_ID__ && window.__BEHEMIRON_SOLO_PANEL_ID__ !== 'uv') {
+						return false;
+					}
 					return !this.hidden && this.mode !== 'face_properties';
 				}
 			},
@@ -4904,12 +4923,14 @@ Interface.definePanels(function() {
 				} else if (this._gl) {
 					this._gl.dispose();
 					this._gl = null;
+					this._glCanvas = null;
 				}
 			},
 			beforeDestroy() {
 				if (this._gl) {
 					this._gl.dispose();
 					this._gl = null;
+					this._glCanvas = null;
 				}
 			},
 			template: `

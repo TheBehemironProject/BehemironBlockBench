@@ -2939,6 +2939,7 @@ Interface.definePanels(function() {
 
 	new Panel('textures', {
 		icon: 'fas.fa-images',
+		expand_button: true,
 		growable: true,
 		resizable: true,
 		condition: {modes: ['edit', 'paint']},

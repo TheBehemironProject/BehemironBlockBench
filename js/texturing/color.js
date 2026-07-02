@@ -503,6 +503,7 @@ Interface.definePanels(() => {
 	// MARK: color panel
 	ColorPanel.panel = new Panel('color', {
 		icon: 'palette',
+		expand_button: true,
 		condition: {modes: ['paint']},
 		default_position: {
 			slot: 'right_bar',
@@ -756,6 +757,7 @@ Interface.definePanels(() => {
 	// MARK: palette panel
 	ColorPanel.palette_panel = new Panel('palette', {
 		icon: 'apps',
+		expand_button: true,
 		condition: {modes: ['paint']},
 		default_position: {
 			slot: 'right_bar',
@@ -1251,7 +1253,15 @@ BARS.defineActions(function() {
 		category: 'color',
 		condition: () => (typeof EyeDropper == 'function' && Blockbench.platform != 'linux'),
 		click: async function () {
-			if (Blockbench.platform == 'win32') {
+			// [Behemiron] 原本 win32 分支走 ipcRenderer.send('request-color-picker', ...)
+			// 绕过一个 Electron 专属 bug(electron/electron#27980)。Foundation
+			// 这边用 --target=web 打包(isApp=false),ipcRenderer 是 native_apis_web
+			// 的空实现,这条 IPC 静默失效——取色器在这个宿主里等于完全不工作。
+			// Wails 用的 WebView2(纯 Chromium,不是 Electron),不受那个 bug 影响,
+			// 原生 EyeDropper 本来就能跨窗口/跨应用取色,isApp 为 false 时应该直接
+			// 走这条,不要绕 Electron 的路。isApp 为 true(真 Electron 打包)时行为
+			// 不变,继续保留原有 workaround。
+			if (isApp && Blockbench.platform == 'win32') {
 				// workaround for https://github.com/electron/electron/issues/27980
 				ipcRenderer.send('request-color-picker', {sync: false});
 

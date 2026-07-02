@@ -1334,6 +1334,7 @@ Interface.definePanels(function() {
 
 	new Panel('outliner', {
 		icon: 'list_alt',
+		expand_button: true,
 		condition: {modes: ['edit', 'paint', 'animate', 'pose'], method: () => (!Format.image_editor && !(Modes.animate && AnimationController.selected))},
 		default_position: {
 			slot: 'right_bar',

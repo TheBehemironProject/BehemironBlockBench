@@ -1079,6 +1079,8 @@
 	"settings.fps_limit.desc": "Limit how many frames per second Blockbench renders. The actual frame rate is limited to what your device can display.",
 	"settings.background_rendering": "Background Rendering",
 	"settings.background_rendering.desc": "Update the preview while the window is not focused",
+	"settings.orbit_cruise_render": "Orbit Cruise Rendering",
+	"settings.orbit_cruise_render.desc": "For projects above 500 cubes, temporarily merge cubes into a single mesh while orbiting/panning/zooming the camera, to keep navigation smooth. Selection outlines are briefly hidden during the drag and restore instantly once you release.",
 	"settings.particle_tick_rate": "Particle Tick Rate",
 	"settings.particle_tick_rate.desc": "Tick rate for particle effects in ticks per second. Default is 30",
 	"settings.flipbook_textures_in_animation": "Play Flipbook Textures in Animation",

@@ -1082,6 +1082,8 @@
 	"settings.interface_scale.desc": "Blockbench 界面缩放比",
 	"settings.background_rendering": "背景渲染",
 	"settings.background_rendering.desc": "窗口失去焦点时更新预览",
+	"settings.orbit_cruise_render": "视角巡航渲染",
+	"settings.orbit_cruise_render.desc": "工程超过 500 个立方体时，拖拽旋转/平移/缩放视角期间临时把立方体合并成一个网格，保持导航流畅；拖拽期间选中高亮会短暂隐藏，松手立即恢复。",
 	"settings.ctrl_shift_size": "Ctrl + Shift 移动距离",
 	"settings.ctrl_shift_size.desc": "同时按住 Ctrl 和 Shift 时立方体移动的距离",
 	"settings.hardware_acceleration": "硬件加速",

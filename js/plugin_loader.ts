@@ -503,7 +503,15 @@ export class Plugin {
 	}
 	async loadFromFile(file: Filesystem.FileResult, first = false) {
 		var scope = this;
-		if (!isApp && !first) return this;
+		// [Behemiron] 原来是 `if (!isApp && !first) return this;`——Web 构建
+		// 目标(isApp=false)下,"非首次安装"只可能来自启动时 loadInstalledPlugins()
+		// 的重载,原逻辑认为 Web 版反正没有文件系统可读、重载必然拿不到内容,
+		// 直接短路退出。但 Foundation 这边现在会把"从文件安装"的插件源码持久化
+		// 到工作区(见 internal/blockbench/service.go 的 window.__BEHEMIRON_BB_
+		// PLUGIN_SOURCES__ 注入),启动重载时如果调用方已经把持久化的源码文本
+		// 填进了 file.content,就不应该再无条件退出——只有真的没有内容可执行时
+		// 才短路。
+		if (!isApp && !first && !file.content) return this;
 		if (first) {
 			if (isApp) {
 				if (!confirm(tl('message.load_plugin_app'))) return;
@@ -532,6 +540,15 @@ export class Plugin {
 			this.#runCode(file.content as string);
 			if (first && scope.oninstall) {
 				scope.oninstall()
+			}
+			// [Behemiron] Web 目标下插件源码只存在于这次内存里的 file.content,
+			// 从不落盘——首次安装时顺手交给 host 持久化到工作区的
+			// .behemiron/.blockbench-plugin/<id>.js,下次启动 loadInstalledPlugins()
+			// 才有内容可以喂回 loadFromFile(fake_file, false) 重新执行(见上面
+			// 早退守卫的调整和 loadInstalledPlugins() 里新增的 Web 分支)。只在
+			// first 时写一次,重载时不用再重复持久化同一份内容。
+			if (first && typeof (window as any).__behemironSavePluginSource === 'function') {
+				(window as any).__behemironSavePluginSource(this.id, file.content);
 			}
 		}
 		this.installed = true;
@@ -1102,6 +1119,11 @@ export async function loadInstalledPlugins() {
 
 		// Install plugins
 		var load_counter = 0;
+		// [Behemiron] Web 构建目标(isApp=false)下重新读取"从文件安装"的插件
+		// 需要的源码文本,由 internal/blockbench/service.go 在 serve index.html
+		// 时同步注入(当前工作区 .behemiron/.blockbench-plugin/*.js 的内容)。
+		// 缺失时值为 undefined,和原来"直接移除"的行为等价。
+		const persistedPluginSources: Record<string, string> = (window as any).__BEHEMIRON_BB_PLUGIN_SOURCES__ || {};
 		function loadPlugin(installation: PluginInstallation) {
 			if (installation.source == 'file') {
 				// Dev Plugins
@@ -1110,6 +1132,19 @@ export async function loadInstalledPlugins() {
 					install_promises.push(instance.loadFromFile({path: installation.path, name: installation.path, content: ''}, false));
 					load_counter++;
 					console.log(`🧩📁 Loaded plugin "${installation.id || installation.path}" from file`);
+				} else if (!isApp && persistedPluginSources[installation.id]) {
+					// [Behemiron] Web 目标没有文件系统路径可读,改用 Foundation
+					// 持久化的源码文本重新执行——loadFromFile() 的早退守卫已经
+					// 放宽为"有 content 就不提前退出",这里传 first=false 走的是
+					// 重载路径,不会重复触发安装确认对话框/oninstall 钩子。
+					var instance = new Plugin(installation.id, {disabled: installation.disabled});
+					install_promises.push(instance.loadFromFile({
+						path: installation.path,
+						name: installation.path,
+						content: persistedPluginSources[installation.id],
+					}, false));
+					load_counter++;
+					console.log(`🧩📁 Loaded plugin "${installation.id || installation.path}" from persisted workspace source`);
 				} else {
 					Plugins.installed.remove(installation);
 				}

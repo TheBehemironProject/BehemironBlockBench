@@ -6,6 +6,12 @@ import { toSnakeCase } from '../util/util';
 import { electron, ipcRenderer } from '../native_apis';
 import { Pressing } from '../misc';
 import { PointerTarget } from '../interface/pointer_target';
+import { tickOrbitCruiseRender, raycastCruiseHiddenCubes, initOrbitCruiseRender } from './orbit_cruise_render';
+
+// [Behemiron] 视角巡航渲染(大模型导航期临时合并优化),注册开关 +
+// finish_edit 缓存失效钩子。只需要在这里 import 一次(preview.js 本身已经
+// 在 main.ts 的 side-effect import 链路上),不需要再单独往 main.ts 加一行。
+initOrbitCruiseRender();
 
 window.scene = null;
 window.main_preview = null;
@@ -460,7 +466,17 @@ export class Preview {
 			})
 		}
 		let intersects = this.raycaster.intersectObjects(objects, false);
-		if (intersects.length == 0) return false;
+		if (intersects.length == 0) {
+			// [Behemiron] 视角巡航渲染兜底:原生候选列表只含 mesh.visible!=false
+			// 的对象,巡航渲染生效期间真实 cube mesh 都被隐藏了,原生列表天然
+			// 拿不到结果。直接对那些被隐藏的真实 mesh 重新跑一次
+			// intersectObjects——THREE.Mesh.raycast() 本身不检查 visible,
+			// 拿到的交点数据(face/uv/point)跟原生点击完全一样,下游选中/
+			// 材质拾色逻辑不需要跟着改。巡航渲染没生效时这个函数直接返回空
+			// 数组,不影响原有行为。
+			intersects = raycastCruiseHiddenCubes(this.raycaster);
+			if (intersects.length == 0) return false;
+		}
 
 		let depth_offset = Preview.selected.calculateControlScale(intersects[0].point);
 		for (let intersect of intersects) {
@@ -596,6 +612,10 @@ export class Preview {
 	}
 	render() {
 		this.controls.update()
+		// [Behemiron] 视角巡航渲染:每帧轮询一次"现在该不该显示合并视图"
+		// (setting 开关 + cube 数阈值 + 没有交互占用指针 + 没有选中内容),
+		// 状态真正翻转时才会触发一次合并/还原,重复调用是安全的空操作。
+		tickOrbitCruiseRender()
 		this.renderer.render(
 			Canvas.scene,
 			this.camera

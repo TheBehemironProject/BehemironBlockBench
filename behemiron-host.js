@@ -385,10 +385,31 @@
   }
 
   // ---- 面板真弹出(Phase 1) ----
+  // 弹出窗口是全新独立的 BB 实例,自己的 usePanelPopout.ts 靠
+  // BlockbenchService.getProject(projectUuid) 从 SQLite 按 uuid 反查工程内容
+  // 来初始化——但"未命名/从未保存过"的工程(compileCurrentProject 默认跳过
+  // 持久化,见上面的 isNamed 判断,是刻意设计,避免新建即编辑堆出一堆 noname
+  // 历史项)在 SQLite 里根本没有行。这类工程点"弹出"时,弹出窗口的
+  // getProject 请求会静默失败(捕获后什么都不做),导致 host:project-open
+  // 从来没有发出去,连带 applyPanelSoloMode/applyPreviewSoloMode 也从来没
+  // 跑——用户看到的就是一个完全没被摆布过的 BB 默认启动界面(看起来像"新建
+  // 项目"),这正是新用户第一次打开、工程还没保存过就点弹出会踩到的真实
+  // 复现路径。修复:弹出请求发出去之前,先无条件(allowUnnamed:true)把当前
+  // 工程"力所能及"地存一次——复用已有的 bb:project-saved 通道(跟真正编辑
+  // 触发的自动保存走同一条路,只是这里不受"未命名跳过"限制)。发送两条
+  // postMessage 是异步排队处理但严格按发送顺序(FIFO),而"新窗口创建 + BB
+  // 完整重新启动 + bb:ready + 请求工程"这条链路天然比一次本地 SQLite upsert
+  // 慢得多,不需要额外等待确认也能保证时序正确。
+  function ensureCurrentProjectPersisted() {
+    var dto = compileCurrentProject({ allowUnnamed: true });
+    if (dto) sendToHost('bb:project-saved', { project: dto });
+  }
+
   // 暴露为全局,让 panels.ts 的 expand_button 在 host 模式下调用,取代原本
   // 同页面内 moveTo('float') 的"假弹出"。
   window.behemironRequestPanelPopout = function (panelId, width, height) {
     if (!panelId) return;
+    ensureCurrentProjectPersisted();
     sendToHost('bb:request-panel-popout', {
       kind: 'panel',
       panelId: panelId,
@@ -409,6 +430,7 @@
   // 一个全屏的 main_preview,不复刻分屏布局。
   window.behemironRequestPreviewPopout = function (slotIndex, width, height) {
     if (typeof slotIndex !== 'number') return;
+    ensureCurrentProjectPersisted();
     sendToHost('bb:request-panel-popout', {
       kind: 'preview',
       panelId: String(slotIndex),
@@ -416,6 +438,22 @@
       width: typeof width === 'number' ? Math.round(width) : 0,
       height: typeof height === 'number' ? Math.round(height) : 0,
     });
+  };
+
+  // ---- 插件持久化(从文件安装的插件在 --target=web 下重启会丢失) ----
+  // js/plugin_loader.ts 的 Plugin.loadFromFile() 首次安装成功后调用一次,
+  // 单向 fire-and-forget(不需要回执,参考 bb:project-saved 的模式,不是
+  // bb:flush-current 那种需要 requestId 往返的模式)。host 端落盘到当前
+  // 工作区 .behemiron/.blockbench-plugin/<id>.js;下次启动时
+  // internal/blockbench/service.go 会把这个目录整体注入回
+  // window.__BEHEMIRON_BB_PLUGIN_SOURCES__,loadInstalledPlugins() 据此重新
+  // 执行(见 plugin_loader.ts 里的对应改动)。未打开工作区时后端会返回错误,
+  // 这里静默失败即可——插件仍然在当前会话里正常工作,只是不会跨重启保留,
+  // 跟"没做这个功能之前"的行为一致,不是新的坏结果。
+  window.__behemironSavePluginSource = function (id, code) {
+    if (typeof id !== 'string' || !id) return;
+    if (typeof code !== 'string') return;
+    sendToHost('bb:plugin-source-save', { id: id, code: code });
   };
 
   // 接收 host 推来的"某面板在独立窗口里的开关状态"变化,转给 panels.ts
@@ -743,6 +781,21 @@
           // 提前到 bb:ready 时应用会因为工程还没加载、面板内容压根没渲染出
           // 东西而导致弹出窗口一片空白(实测踩过)。整编辑器弹出/主窗口没有
           // soloPanelId/soloPreviewSlot,这两个分支不会命中,不影响它们。
+          if (soloPanelId) {
+            applyPanelSoloMode(soloPanelId);
+            sendToHost('bb:panel-solo-ready', {});
+          } else if (soloPreviewSlot !== null) {
+            applyPreviewSoloMode();
+            sendToHost('bb:panel-solo-ready', {});
+          }
+          break;
+        case 'host:apply-solo-mode':
+          // 面板/预览弹出窗口专属兜底:usePanelPopout.ts 在 getProject 失败
+          // (或压根没有 projectUuid)时发这个,跳过 openSingleProject 直接应用
+          // solo 布局——目标面板/预览格至少显示在正确的位置(即使内容是空
+          // 的),而不是让弹出窗口停留在完全没被摆布过的 BB 默认启动界面。
+          // 主窗口/整编辑器弹出没有 soloPanelId/soloPreviewSlot,这两个分支
+          // 不会命中,是安全的空操作。
           if (soloPanelId) {
             applyPanelSoloMode(soloPanelId);
             sendToHost('bb:panel-solo-ready', {});

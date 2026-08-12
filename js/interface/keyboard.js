@@ -280,7 +280,7 @@ export class Keybind {
 		if ( !(this.meta	===  event.metaKey								|| this.meta === null	|| modifiers_used.has('ctrl') 	) ) return false;
 
 		if (this.key == event.which) return true;
-		if (this.key == 1001 && event instanceof MouseEvent) return true;
+		if (this.key == 1001 && event instanceof WheelEvent) return true;
 		if (this.key >= 1010 && this.key < 1018 && input_type == 'pointer_slide') {
 			if ((this.key == 1010 || this.key == 1011) && event.which == 1) return true;
 			if ((this.key == 1012 || this.key == 1013) && event.which == 3) return true;
@@ -846,7 +846,7 @@ addEventListeners(document, 'keydown mousedown', function(e) {
 			ReferenceImageMode.deactivate();
 			used = true;
 		}
-	} else if (Project && Undo.amend_edit_menu && (Keybinds.extra.confirm.keybind.isTriggered(e) || Keybinds.extra.cancel.keybind.isTriggered(e))) {
+	} else if (Project && Undo.amend_edit_menu && !input_focus && (Keybinds.extra.confirm.keybind.isTriggered(e) || Keybinds.extra.cancel.keybind.isTriggered(e))) {
 		Undo.closeAmendEditMenu();
 
 	} else if (UVEditor.vue.texture_selection_polygon.length && Keybinds.extra.cancel.keybind.isTriggered(e)) {

@@ -1083,6 +1083,7 @@ export const UVEditor = {
 				selected_faces.replace([face_key]);
 			}
 			UVEditor.vue.$forceUpdate();
+			updateSelection();
 		}
 	},
 	moveSelection(offset, event) {
